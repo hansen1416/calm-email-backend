@@ -2,6 +2,11 @@
 import os
 import secrets
 from datetime import timedelta
+from dotenv import load_dotenv
+
+# 加载 .env 文件（如果存在）
+# 从当前工作目录向上查找 .env 文件
+load_dotenv(override=True)
 
 class Config:
     # 安全密钥配置
