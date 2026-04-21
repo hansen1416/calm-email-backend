@@ -68,13 +68,24 @@ class Contact(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
                            comment='更新时间')
 
-    groups = db.relationship('ContactGroup', secondary=group_contacts,
-                             primaryjoin='Contact.id == group_contacts.c.contact_id',
-                             secondaryjoin='ContactGroup.id == group_contacts.c.group_id',
-                             back_populates='contacts')
-
     def __repr__(self):
         return f'<Contact {self.email}>'
+
+    def get_group_ids(self):
+        """获取联系人所属的组ID列表"""
+        from sqlalchemy import text
+        result = db.session.execute(
+            text("SELECT group_id FROM group_contacts WHERE contact_id = :cid"),
+            {"cid": self.id}
+        )
+        return [row[0] for row in result]
+
+    def get_groups(self):
+        """获取联系人所属的所有组"""
+        group_ids = self.get_group_ids()
+        if not group_ids:
+            return []
+        return ContactGroup.query.filter(ContactGroup.id.in_(group_ids)).all()
 
 
 class ContactGroup(db.Model):
@@ -93,13 +104,56 @@ class ContactGroup(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow,
                            comment='创建时间')
 
-    contacts = db.relationship('Contact', secondary=group_contacts,
-                               primaryjoin='ContactGroup.id == group_contacts.c.group_id',
-                               secondaryjoin='Contact.id == group_contacts.c.contact_id',
-                               back_populates='groups')
-
     def __repr__(self):
         return f'<Group {self.name}>'
+
+    def get_contact_ids(self):
+        """获取组内所有联系人ID列表"""
+        from sqlalchemy import text
+        result = db.session.execute(
+            text("SELECT contact_id FROM group_contacts WHERE group_id = :gid"),
+            {"gid": self.id}
+        )
+        return [row[0] for row in result]
+
+    def get_contacts(self):
+        """获取组内的所有联系人"""
+        contact_ids = self.get_contact_ids()
+        if not contact_ids:
+            return []
+        return Contact.query.filter(Contact.id.in_(contact_ids)).all()
+
+    def add_contact(self, contact_id):
+        """添加联系人到组"""
+        from sqlalchemy import text
+        try:
+            db.session.execute(
+                text("INSERT INTO group_contacts (group_id, contact_id) VALUES (:gid, :cid)"),
+                {"gid": self.id, "cid": contact_id}
+            )
+            db.session.commit()
+            return True
+        except Exception:
+            db.session.rollback()
+            return False
+
+    def remove_contact(self, contact_id):
+        """从组中移除联系人"""
+        from sqlalchemy import text
+        db.session.execute(
+            text("DELETE FROM group_contacts WHERE group_id = :gid AND contact_id = :cid"),
+            {"gid": self.id, "cid": contact_id}
+        )
+        db.session.commit()
+
+    def has_contact(self, contact_id):
+        """检查组中是否包含指定联系人"""
+        from sqlalchemy import text
+        result = db.session.execute(
+            text("SELECT 1 FROM group_contacts WHERE group_id = :gid AND contact_id = :cid LIMIT 1"),
+            {"gid": self.id, "cid": contact_id}
+        )
+        return result.fetchone() is not None
 
 
 class EmailTemplate(db.Model):

@@ -7,7 +7,7 @@ contacts_bp = Blueprint('contacts', __name__)
 def contact_to_dict(c):
     return dict(id=c.id, name=c.name, email=c.email, phone=c.phone,
                 company=c.company, notes=c.notes,
-                groups=[g.id for g in c.groups],
+                groups=c.get_group_ids(),
                 created_at=c.created_at.strftime('%Y-%m-%d %H:%M:%S'))
 
 @contacts_bp.route('', methods=['GET'])

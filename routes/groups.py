@@ -5,9 +5,10 @@ from models import db, ContactGroup, Contact
 groups_bp = Blueprint('groups', __name__)
 
 def group_to_dict(g):
+    contacts = g.get_contacts()
     return dict(id=g.id, name=g.name, description=g.description,
-                contact_count=len(g.contacts),
-                contacts=[dict(id=c.id, name=c.name, email=c.email) for c in g.contacts],
+                contact_count=len(contacts),
+                contacts=[dict(id=c.id, name=c.name, email=c.email) for c in contacts],
                 created_at=g.created_at.strftime('%Y-%m-%d %H:%M:%S'))
 
 @groups_bp.route('', methods=['GET'])
@@ -64,9 +65,8 @@ def add_members(gid):
     contact_ids = data.get('contact_ids', [])
     contacts = Contact.query.filter(Contact.id.in_(contact_ids), Contact.user_id == uid).all()
     for c in contacts:
-        if c not in g.contacts:
-            g.contacts.append(c)
-    db.session.commit()
+        if not g.has_contact(c.id):
+            g.add_contact(c.id)
     return jsonify(group_to_dict(g)), 200
 
 @groups_bp.route('/<int:gid>/members', methods=['DELETE'])
@@ -78,6 +78,6 @@ def remove_members(gid):
         return jsonify(msg='用户组不存在'), 404
     data = request.get_json()
     contact_ids = data.get('contact_ids', [])
-    g.contacts = [c for c in g.contacts if c.id not in contact_ids]
-    db.session.commit()
+    for cid in contact_ids:
+        g.remove_contact(cid)
     return jsonify(group_to_dict(g)), 200
