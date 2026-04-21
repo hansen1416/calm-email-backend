@@ -6,6 +6,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, Workflow, WorkflowInstance, EmailTemplate, EmailLog, Contact, ContactGroup, NodeExecution
 from routes.email import send_email
 from services.scheduler import schedule_relative_delay, schedule_absolute_delay
+from utils.cascade_delete import delete_workflow_cascade
 
 workflow_bp = Blueprint('workflow', __name__)
 
@@ -96,13 +97,21 @@ def update_workflow(wid):
 @workflow_bp.route('/<int:wid>', methods=['DELETE'])
 @jwt_required()
 def delete_workflow(wid):
+    """删除工作流 - 使用级联删除处理关联数据"""
     uid = int(get_jwt_identity())
     w = Workflow.query.filter_by(id=wid, user_id=uid).first()
     if not w:
         return jsonify(msg='工作流不存在'), 404
-    db.session.delete(w)
-    db.session.commit()
-    return jsonify(msg='删除成功'), 200
+    
+    # 使用级联删除处理关联数据（移除外键后手动实现）
+    try:
+        result = delete_workflow_cascade(wid)
+        return jsonify(
+            msg='删除成功',
+            deleted_data=result
+        ), 200
+    except Exception as e:
+        return jsonify(msg=f'删除失败: {str(e)}'), 500
 
 
 def evaluate_condition(field, operator, value, event_data):
@@ -129,7 +138,7 @@ def evaluate_condition(field, operator, value, event_data):
     return False
 
 
-def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=False, resumed_event_data=None):
+def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=False, resumed_event_data=None, source_event_id=None):
     """为单个实例执行节点
 
     Args:
@@ -140,6 +149,7 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
         uid: 用户ID
         mock: 是否模拟发送
         resumed_event_data: 如果是恢复执行，传入触发的事件数据
+        source_event_id: 触发本次执行的事件ID（用于记录到EmailLog）
 
     Returns:
         dict: 执行结果 {continue: bool, paused: bool, result: str, output: dict}
@@ -159,7 +169,9 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
         node_type=node_type,
         node_label=label,
         result='running',
-        input_data=data
+        input_data=data,
+        resumed_by_event_id=source_event_id,  # 记录触发本次执行的事件ID
+        event_data=resumed_event_data  # 记录触发本次执行的事件数据
     )
     db.session.add(node_exec)
     db.session.commit()
@@ -188,19 +200,33 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
         template_id = data.get('template_id')
         contact_ids = data.get('contact_ids', [])
         group_ids = data.get('group_ids', [])
-        
+
         if not template_id:
+            # 更新节点执行记录为失败
+            end_time = datetime.utcnow()
+            node_exec.result = 'failed'
+            node_exec.error_message = 'No template_id configured'
+            node_exec.completed_at = end_time
+            node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            db.session.commit()
             return False
-        
+
         tpl = EmailTemplate.query.filter_by(id=template_id, user_id=uid).first()
         if not tpl:
+            # 更新节点执行记录为失败
+            end_time = datetime.utcnow()
+            node_exec.result = 'failed'
+            node_exec.error_message = f'Template {template_id} not found'
+            node_exec.completed_at = end_time
+            node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            db.session.commit()
             return False
-        
+
         # 只发送给当前实例对应的收件人
         emails = set()
         if instance.recipient_email:
             emails.add(instance.recipient_email)
-        
+
         # 如果没有特定收件人，使用联系人/群组配置
         if not emails:
             if contact_ids:
@@ -210,10 +236,21 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
                 for g in ContactGroup.query.filter(ContactGroup.id.in_(group_ids), Contact.user_id==uid).all():
                     for c in g.contacts:
                         emails.add(c.email)
-        
+
         if not emails:
+            # 更新节点执行记录为失败
+            end_time = datetime.utcnow()
+            node_exec.result = 'failed'
+            node_exec.error_message = 'No recipients'
+            node_exec.completed_at = end_time
+            node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            db.session.commit()
             return False
-        
+
+        sent_count = 0
+        failed_count = 0
+        message_ids = []
+
         for addr in emails:
             ok, msg_id = send_email(addr, tpl.subject, tpl.body, mock=mock)
             log = EmailLog(
@@ -222,69 +259,109 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
                 workflow_id=instance.workflow_id,
                 instance_id=instance.id,
                 node_id=node_id,
+                source_event_id=source_event_id,
                 recipient_email=addr,
                 subject=tpl.subject,
                 message_id=msg_id,
                 status='sent' if ok else 'failed'
             )
             db.session.add(log)
-            
+
             # 如果是首封邮件，记录 message_id 到实例
             if not instance.message_id:
                 instance.message_id = msg_id
-                db.session.commit()
-        
+
+            if ok:
+                sent_count += 1
+                message_ids.append(msg_id)
+            else:
+                failed_count += 1
+
+        db.session.commit()
+
+        # 更新节点执行记录为成功
+        end_time = datetime.utcnow()
+        node_exec.result = 'success'
+        node_exec.output_data = {
+            'sent_count': sent_count,
+            'failed_count': failed_count,
+            'message_ids': message_ids,
+            'recipients': list(emails)
+        }
+        node_exec.completed_at = end_time
+        node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        db.session.commit()
+
         return True
-    
+
     elif node_type == 'driver':
         # 处理 driver 节点 - 暂停等待事件
         steps = data.get('steps', [])
         step_order = data.get('stepOrder', ['event', 'condition', 'delay'])
         step_config = {s.get('id'): s for s in steps}
         enabled_steps = [s for s in step_order if step_config.get(s, {}).get('enabled', False)]
-        
+
         # 提取等待的事件类型和条件
         waiting_event_type = None
         waiting_conditions = {}
-        
+
         for step_id in enabled_steps:
             step = step_config.get(step_id, {})
-            
+
             if step_id == 'event' and step.get('enabled'):
-                waiting_event_type = step.get('event_type')
+                waiting_event_type = step.get('event_type', '').lower() if step.get('event_type') else None
                 if step.get('link_url'):
                     waiting_conditions['link_url'] = step.get('link_url')
-            
+
             elif step_id == 'condition' and step.get('enabled'):
                 waiting_conditions['field'] = step.get('field')
                 waiting_conditions['operator'] = step.get('operator')
                 waiting_conditions['value'] = step.get('value')
-        
+
         # 更新实例为等待状态
         instance.status = 'waiting_event'
         instance.waiting_event_type = waiting_event_type
         instance.waiting_conditions = waiting_conditions if waiting_conditions else None
         instance.waiting_since = datetime.utcnow()
         db.session.commit()
-        
+
+        # 更新节点执行记录为等待状态
+        end_time = datetime.utcnow()
+        node_exec.result = 'waiting'
+        node_exec.output_data = {
+            'waiting_event_type': waiting_event_type,
+            'waiting_conditions': waiting_conditions,
+            'enabled_steps': enabled_steps
+        }
+        node_exec.completed_at = end_time
+        node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        db.session.commit()
+
         print(f"[Instance {instance.id}] Waiting for event: {waiting_event_type}")
-        
+
         # Driver 节点暂停，不继续执行后续节点
         return False
-    
+
     elif node_type == 'delay':
         # 处理延时节点
         delay_type = data.get('delayType', 'relative')
         recipient = instance.recipient_email
-        
+
         next_ids = next_map.get(node_id, [])
         if not next_ids:
+            # 更新节点执行记录为失败
+            end_time = datetime.utcnow()
+            node_exec.result = 'failed'
+            node_exec.error_message = 'No next nodes'
+            node_exec.completed_at = end_time
+            node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            db.session.commit()
             return False
-        
+
         if delay_type == 'relative':
             delay_value = data.get('delayValue', 1)
             delay_unit = data.get('delayUnit', 'hours')
-            
+
             # 安排延时任务
             for next_id in next_ids:
                 next_node = node_map.get(next_id)
@@ -306,7 +383,7 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
                         print(f"[Instance {instance.id}] Scheduled delay: {delay_value} {delay_unit}")
         else:
             delay_datetime = data.get('delayDateTime')
-            
+
             for next_id in next_ids:
                 next_node = node_map.get(next_id)
                 if next_node and next_node.get('data', {}).get('nodeType') == 'email':
@@ -324,26 +401,69 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
                         instance.context['scheduled_job_id'] = job_id
                         db.session.commit()
                         print(f"[Instance {instance.id}] Scheduled absolute delay: {delay_datetime}")
-        
+
+        # 更新节点执行记录为等待状态（延时）
+        end_time = datetime.utcnow()
+        node_exec.result = 'waiting'
+        node_exec.output_data = {
+            'delay_type': delay_type,
+            'delay_config': data
+        }
+        node_exec.completed_at = end_time
+        node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        db.session.commit()
+
         # 延时节点暂停，等待调度器恢复
         return False
-    
+
     elif node_type == 'condition':
         # 条件判断节点
         field = data.get('field')
         operator = data.get('operator')
         value = data.get('value')
-        
+
         # 手动执行时条件判断跳过
         print(f"[Instance {instance.id}] Condition: {field} {operator} {value}")
+
+        # 更新节点执行记录
+        end_time = datetime.utcnow()
+        node_exec.result = 'success'
+        node_exec.output_data = {
+            'field': field,
+            'operator': operator,
+            'value': value,
+            'skipped': True
+        }
+        node_exec.completed_at = end_time
+        node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        db.session.commit()
+
         return True
-    
+
     elif node_type == 'event':
         # 事件触发节点
         event_type = data.get('event_type')
         print(f"[Instance {instance.id}] Event trigger: {event_type}")
+
+        # 更新节点执行记录
+        end_time = datetime.utcnow()
+        node_exec.result = 'success'
+        node_exec.output_data = {
+            'event_type': event_type
+        }
+        node_exec.completed_at = end_time
+        node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+        db.session.commit()
+
         return True
-    
+
+    # 更新节点执行记录为成功（默认）
+    end_time = datetime.utcnow()
+    node_exec.result = 'success'
+    node_exec.completed_at = end_time
+    node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+    db.session.commit()
+
     return True
 
 

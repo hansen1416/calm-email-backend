@@ -4,66 +4,166 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 db = SQLAlchemy()
 
-# 用户组与联系人多对多关系
-group_contacts = db.Table('group_contacts',
-    db.Column('group_id', db.Integer, db.ForeignKey('contact_group.id'), primary_key=True),
-    db.Column('contact_id', db.Integer, db.ForeignKey('contact.id'), primary_key=True)
+# 用户组与联系人多对多关系表（无外键约束）
+group_contacts = db.Table(
+    'group_contacts',
+    db.Column('group_id', db.Integer, primary_key=True, comment='用户组ID'),
+    db.Column('contact_id', db.Integer, primary_key=True, comment='联系人ID')
 )
 
+
 class User(db.Model):
+    """用户表 - 存储系统用户信息"""
     __tablename__ = 'user'
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(256), nullable=False)
-    email = db.Column(db.String(120), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = {'comment': '用户表 - 存储系统用户信息'}
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='用户ID，主键自增')
+    username = db.Column(db.String(80), unique=True, nullable=False,
+                         comment='用户名，唯一')
+    password_hash = db.Column(db.String(256), nullable=False,
+                              comment='密码哈希值')
+    email = db.Column(db.String(120), nullable=True,
+                      comment='用户邮箱，可选')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
 
     def set_password(self, password):
+        """设置密码"""
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
+        """验证密码"""
         return check_password_hash(self.password_hash, password)
 
+    def __repr__(self):
+        return f'<User {self.username}>'
+
+
 class Contact(db.Model):
+    """联系人表 - 存储用户联系人信息"""
     __tablename__ = 'contact'
     __table_args__ = (
         db.Index('idx_contact_user_id', 'user_id'),
         db.Index('idx_contact_email', 'email'),
+        {'comment': '联系人表 - 存储用户联系人信息'}
     )
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(120), nullable=False)
-    phone = db.Column(db.String(30), nullable=True)
-    company = db.Column(db.String(100), nullable=True)
-    notes = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    groups = db.relationship('ContactGroup', secondary=group_contacts, back_populates='contacts')
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='联系人ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='所属用户ID')
+    name = db.Column(db.String(100), nullable=False,
+                     comment='联系人姓名')
+    email = db.Column(db.String(120), nullable=False,
+                      comment='联系人邮箱')
+    phone = db.Column(db.String(30), nullable=True,
+                      comment='联系人电话')
+    company = db.Column(db.String(100), nullable=True,
+                       comment='联系人公司')
+    notes = db.Column(db.Text, nullable=True,
+                      comment='备注信息')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                           comment='更新时间')
+
+    groups = db.relationship('ContactGroup', secondary=group_contacts,
+                             primaryjoin='Contact.id == group_contacts.c.contact_id',
+                             secondaryjoin='ContactGroup.id == group_contacts.c.group_id',
+                             back_populates='contacts')
+
+    def __repr__(self):
+        return f'<Contact {self.email}>'
+
 
 class ContactGroup(db.Model):
+    """联系人组表 - 存储用户联系人分组信息"""
     __tablename__ = 'contact_group'
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.String(255), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = {'comment': '联系人组表 - 存储用户联系人分组信息'}
 
-    contacts = db.relationship('Contact', secondary=group_contacts, back_populates='groups')
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='组ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='所属用户ID')
+    name = db.Column(db.String(100), nullable=False,
+                     comment='组名称')
+    description = db.Column(db.String(255), nullable=True,
+                             comment='组描述')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+
+    contacts = db.relationship('Contact', secondary=group_contacts,
+                               primaryjoin='ContactGroup.id == group_contacts.c.group_id',
+                               secondaryjoin='Contact.id == group_contacts.c.contact_id',
+                               back_populates='groups')
+
+    def __repr__(self):
+        return f'<Group {self.name}>'
+
 
 class EmailTemplate(db.Model):
+    """邮件模板表 - 存储用户邮件模板"""
     __tablename__ = 'email_template'
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    subject = db.Column(db.String(255), nullable=False)
-    body = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = {'comment': '邮件模板表 - 存储用户邮件模板'}
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='模板ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='所属用户ID')
+    name = db.Column(db.String(100), nullable=False,
+                     comment='模板名称')
+    subject = db.Column(db.String(255), nullable=False,
+                         comment='邮件主题')
+    body = db.Column(db.Text, nullable=False,
+                     comment='邮件正文（支持HTML）')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                           comment='更新时间')
+
+    def __repr__(self):
+        return f'<Template {self.name}>'
+
+
+class Workflow(db.Model):
+    """工作流表 - 存储工作流定义"""
+    __tablename__ = 'workflow'
+    __table_args__ = {'comment': '工作流表 - 存储工作流定义'}
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='工作流ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='所属用户ID')
+    name = db.Column(db.String(100), nullable=False,
+                     comment='工作流名称')
+    flow_data = db.Column(db.Text, nullable=False,
+                          comment='工作流数据（JSON格式，包含nodes和edges）')
+    status = db.Column(db.String(20), default='inactive',
+                       comment='工作流状态：active-激活，inactive-未激活')
+    execution_mode = db.Column(db.String(20), default='manual',
+                               comment='执行模式：manual-手动，auto-定时')
+    start_time = db.Column(db.DateTime, nullable=True,
+                           comment='定时执行时间（仅execution_mode=auto时使用）')
+    last_executed_at = db.Column(db.DateTime, nullable=True,
+                                 comment='最后执行时间')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                           comment='更新时间')
+
+    # 关系 - 使用 primaryjoin 明确指定关联条件
+    instances = db.relationship('WorkflowInstance',
+                                  primaryjoin='Workflow.id == WorkflowInstance.workflow_id',
+                                  foreign_keys='WorkflowInstance.workflow_id',
+                                  backref='workflow', lazy=True)
+
+    def __repr__(self):
+        return f'<Workflow {self.name}>'
+
 
 class WorkflowInstance(db.Model):
-    """工作流执行实例 - 每封邮件对应一个实例"""
+    """工作流实例表 - 记录每个工作流执行实例"""
     __tablename__ = 'workflow_instance'
     __table_args__ = (
         db.Index('idx_instance_workflow_id', 'workflow_id'),
@@ -71,141 +171,201 @@ class WorkflowInstance(db.Model):
         db.Index('idx_instance_status', 'status'),
         db.Index('idx_instance_message_id', 'message_id'),
         db.Index('idx_instance_created_at', 'created_at'),
+        {'comment': '工作流实例表 - 记录每个工作流执行实例（每个收件人对应一个实例）'}
     )
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    workflow_id = db.Column(db.Integer, db.ForeignKey('workflow.id'), nullable=False)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='实例ID，主键自增')
+    workflow_id = db.Column(db.Integer, nullable=False,
+                            comment='工作流ID')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='用户ID')
+
     # 关联信息
-    recipient_email = db.Column(db.String(120), nullable=False)  # 收件人
-    message_id = db.Column(db.String(100), nullable=True)  # SES Message ID
-    
+    recipient_email = db.Column(db.String(120), nullable=False,
+                                comment='收件人邮箱')
+    message_id = db.Column(db.String(100), nullable=True,
+                           comment='AWS SES Message ID（首封邮件的Message ID）')
+
     # 执行状态
-    status = db.Column(db.String(20), default='pending')  # pending/running/waiting_event/delayed/completed/failed/cancelled
-    current_node_id = db.Column(db.String(50), nullable=True)  # 当前执行到的节点
-    
+    status = db.Column(db.String(20), default='pending',
+                       comment='实例状态：pending-待执行，running-运行中，waiting_event-等待事件，delayed-已延时，completed-已完成，failed-失败，cancelled-已取消')
+    current_node_id = db.Column(db.String(50), nullable=True,
+                                comment='当前执行到的节点ID')
+
     # Driver 节点等待状态
-    waiting_event_type = db.Column(db.String(20), nullable=True)  # click/open/delivery/bounce/etc
-    waiting_conditions = db.Column(db.JSON, nullable=True)  # {field, operator, value}
-    waiting_since = db.Column(db.DateTime, nullable=True)  # 开始等待的时间
-    
+    waiting_event_type = db.Column(db.String(20), nullable=True,
+                                   comment='等待的事件类型：open/click/delivery/bounce/complaint等')
+    waiting_conditions = db.Column(db.JSON, nullable=True,
+                                   comment='等待条件配置（JSON格式：{field, operator, value}）')
+    waiting_since = db.Column(db.DateTime, nullable=True,
+                              comment='开始等待的时间')
+
     # 执行上下文（传递变量）
-    context = db.Column(db.JSON, nullable=True)  # {template_id, contact_ids, group_ids, ...}
-    
+    context = db.Column(db.JSON, nullable=True,
+                        comment='执行上下文（JSON格式，存储template_id, contact_ids等）')
+
     # 时间戳
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    completed_at = db.Column(db.DateTime, nullable=True)
-    
-    # 关系
-    email_logs = db.relationship('EmailLog', backref='instance', lazy=True)
-    node_executions = db.relationship('NodeExecution', backref='instance', lazy=True, cascade='all, delete-orphan', order_by='desc(NodeExecution.executed_at)')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                           comment='更新时间')
+    completed_at = db.Column(db.DateTime, nullable=True,
+                             comment='完成时间')
+
+    # 关系 - 使用 primaryjoin 明确指定关联条件
+    email_logs = db.relationship('EmailLog',
+                                 primaryjoin='WorkflowInstance.id == EmailLog.instance_id',
+                                 foreign_keys='EmailLog.instance_id',
+                                 backref='instance', lazy=True)
+    node_executions = db.relationship('NodeExecution',
+                                        primaryjoin='WorkflowInstance.id == NodeExecution.instance_id',
+                                        foreign_keys='NodeExecution.instance_id',
+                                        backref='instance', lazy=True,
+                                        order_by='desc(NodeExecution.executed_at)')
+
+    def __repr__(self):
+        return f'<Instance {self.id} {self.recipient_email} {self.status}>'
 
 
 class EmailLog(db.Model):
+    """邮件发送日志表 - 记录每封已发送的邮件"""
     __tablename__ = 'email_log'
     __table_args__ = (
         db.Index('idx_emaillog_user_id', 'user_id'),
         db.Index('idx_emaillog_instance_id', 'instance_id'),
         db.Index('idx_emaillog_message_id', 'message_id'),
         db.Index('idx_emaillog_sent_at', 'sent_at'),
+        {'comment': '邮件发送日志表 - 记录每封已发送的邮件'}
     )
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    template_id = db.Column(db.Integer, db.ForeignKey('email_template.id'), nullable=True)
-    workflow_id = db.Column(db.Integer, db.ForeignKey('workflow.id'), nullable=True)
-    instance_id = db.Column(db.Integer, db.ForeignKey('workflow_instance.id'), nullable=True)  # 关联到实例
-    node_id = db.Column(db.String(50), nullable=True)
-    source_event_id = db.Column(db.Integer, db.ForeignKey('email_event.id'), nullable=True)
-    recipient_email = db.Column(db.String(120), nullable=False)
-    subject = db.Column(db.String(255), nullable=False)
-    message_id = db.Column(db.String(100), nullable=True)
-    status = db.Column(db.String(20), default='sent')
-    sent_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-class Workflow(db.Model):
-    __tablename__ = 'workflow'
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    flow_data = db.Column(db.Text, nullable=False)
-    status = db.Column(db.String(20), default='inactive')  # active/inactive
-    execution_mode = db.Column(db.String(20), default='manual')  # manual/auto
-    start_time = db.Column(db.DateTime, nullable=True)  # 定时执行时间
-    last_executed_at = db.Column(db.DateTime, nullable=True)  # 最后执行时间
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # 关系
-    instances = db.relationship('WorkflowInstance', backref='workflow', lazy=True, cascade='all, delete-orphan')
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='日志ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='用户ID')
+    template_id = db.Column(db.Integer, nullable=True,
+                            comment='邮件模板ID')
+    workflow_id = db.Column(db.Integer, nullable=True,
+                            comment='工作流ID')
+    instance_id = db.Column(db.Integer, nullable=True,
+                            comment='工作流实例ID')
+    node_id = db.Column(db.String(50), nullable=True,
+                        comment='节点ID（工作流中的节点）')
+    source_event_id = db.Column(db.Integer, nullable=True,
+                                comment='触发此邮件的事件ID（事件驱动场景）')
+    recipient_email = db.Column(db.String(120), nullable=False,
+                                comment='收件人邮箱')
+    subject = db.Column(db.String(255), nullable=False,
+                        comment='邮件主题')
+    message_id = db.Column(db.String(100), nullable=True,
+                             comment='AWS SES Message ID')
+    status = db.Column(db.String(20), default='sent',
+                       comment='发送状态：sent-已发送，failed-发送失败，bounced-退信，complained-投诉')
+    sent_at = db.Column(db.DateTime, default=datetime.utcnow,
+                        comment='发送时间')
+
+    def __repr__(self):
+        return f'<EmailLog {self.recipient_email}>'
+
 
 class EmailEvent(db.Model):
+    """邮件事件表 - 记录AWS SES推送的邮件事件（打开、点击等）"""
     __tablename__ = 'email_event'
     __table_args__ = (
         db.Index('idx_emailevent_message_id', 'message_id'),
         db.Index('idx_emailevent_event_type', 'event_type'),
         db.Index('idx_emailevent_created_at', 'created_at'),
+        {'comment': '邮件事件表 - 记录AWS SES推送的邮件事件（打开、点击等）'}
     )
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    instance_id = db.Column(db.Integer, db.ForeignKey('workflow_instance.id'), nullable=True)  # 关联到实例
-    message_id = db.Column(db.String(100), nullable=True)
-    event_type = db.Column(db.String(20), nullable=False)
-    recipient_email = db.Column(db.String(120), nullable=False)
-    event_data = db.Column(db.JSON, nullable=True)
-    occurred_at = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='事件ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='用户ID')
+    instance_id = db.Column(db.Integer, nullable=True,
+                            comment='关联的工作流实例ID')
+    message_id = db.Column(db.String(100), nullable=True,
+                           comment='关联的邮件Message ID')
+    event_type = db.Column(db.String(20), nullable=False,
+                           comment='事件类型：send/delivery/open/click/bounce/complaint等')
+    recipient_email = db.Column(db.String(120), nullable=False,
+                                comment='收件人邮箱')
+    event_data = db.Column(db.JSON, nullable=True,
+                           comment='事件原始数据（JSON格式）')
+    source_email_log_id = db.Column(db.Integer, nullable=True,
+    comment='来源邮件日志ID，指向触发此事件的原始邮件')
+    occurred_at = db.Column(db.DateTime, nullable=True,
+                           comment='事件发生时间（来自AWS SNS）')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='记录创建时间')
 
-# __repr__ 方法便于调试
-User.__repr__ = lambda self: f'<User {self.username}>'
-Contact.__repr__ = lambda self: f'<Contact {self.email}>'
-ContactGroup.__repr__ = lambda self: f'<Group {self.name}>'
-EmailTemplate.__repr__ = lambda self: f'<Template {self.name}>'
-Workflow.__repr__ = lambda self: f'<Workflow {self.name}>'
-WorkflowInstance.__repr__ = lambda self: f'<Instance {self.id} {self.recipient_email} {self.status}>'
-EmailLog.__repr__ = lambda self: f'<EmailLog {self.recipient_email}>'
-EmailEvent.__repr__ = lambda self: f'<EmailEvent {self.event_type} {self.recipient_email}>'
+    # SNS 消息去重和延迟监控
+    sns_message_id = db.Column(db.String(100), nullable=True, unique=True,
+                               comment='SNS 消息唯一ID，用于去重')
+    sns_received_at = db.Column(db.DateTime, nullable=True,
+                               comment='SNS 消息接收时间，用于计算回调延迟')
+    sns_delay_seconds = db.Column(db.Float, nullable=True,
+                                  comment='SNS 回调延迟秒数（sns_received_at - sent_at）')
+
+    def __repr__(self):
+        return f'<EmailEvent {self.event_type} {self.recipient_email}>'
 
 
 class NodeExecution(db.Model):
-    """节点执行记录 - 记录每个节点的执行历史"""
+    """节点执行记录表 - 记录工作流中每个节点的执行历史"""
     __tablename__ = 'node_execution'
     __table_args__ = (
         db.Index('idx_nodeexecution_instance_id', 'instance_id'),
         db.Index('idx_nodeexecution_node_id', 'node_id'),
         db.Index('idx_nodeexecution_result', 'result'),
         db.Index('idx_nodeexecution_executed_at', 'executed_at'),
+        {'comment': '节点执行记录表 - 记录工作流中每个节点的执行历史'}
     )
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    instance_id = db.Column(db.Integer, db.ForeignKey('workflow_instance.id'), nullable=False)
-    node_id = db.Column(db.String(50), nullable=False)  # 节点ID
-    node_type = db.Column(db.String(20), nullable=False)  # email/driver/delay/condition
-    node_label = db.Column(db.String(100), nullable=True)  # 节点名称
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='执行记录ID，主键自增')
+    instance_id = db.Column(db.Integer, nullable=False,
+                            comment='工作流实例ID')
+    node_id = db.Column(db.String(50), nullable=False,
+                        comment='节点ID')
+    node_type = db.Column(db.String(20), nullable=False,
+                          comment='节点类型：email-邮件节点，driver-事件驱动节点，delay-延时节点，condition-条件节点')
+    node_label = db.Column(db.String(100), nullable=True,
+                           comment='节点显示名称')
 
     # 执行结果
-    result = db.Column(db.String(20), nullable=False)  # success/waiting/resumed/failed/skipped
+    result = db.Column(db.String(20), nullable=False,
+                       comment='执行结果：running-执行中，success-成功，waiting-等待中（driver/delay节点），resumed-已恢复，failed-失败，skipped-跳过')
 
     # 输入数据（节点配置）
-    input_data = db.Column(db.JSON, nullable=True)  # {template_id, subject, ...}
+    input_data = db.Column(db.JSON, nullable=True,
+                           comment='节点输入数据（JSON格式，包含template_id等配置）')
 
     # 输出数据（执行结果）
-    output_data = db.Column(db.JSON, nullable=True)  # {message_id, status, ...}
+    output_data = db.Column(db.JSON, nullable=True,
+                            comment='节点输出数据（JSON格式，包含message_id, sent_count等结果）')
 
     # 恢复相关（仅 driver 节点）
-    resumed_by_event_id = db.Column(db.Integer, db.ForeignKey('email_event.id'), nullable=True)
-    event_data = db.Column(db.JSON, nullable=True)  # 触发恢复的事件数据
-    conditions_met = db.Column(db.Boolean, nullable=True)  # 条件是否满足
+    resumed_by_event_id = db.Column(db.Integer, nullable=True,
+                                    comment='恢复此节点执行的事件ID（仅driver节点）')
+    event_data = db.Column(db.JSON, nullable=True,
+                           comment='触发恢复的事件数据（仅driver节点）')
+    conditions_met = db.Column(db.Boolean, nullable=True,
+                               comment='条件是否满足（仅driver/condition节点）')
 
     # 错误信息
-    error_message = db.Column(db.Text, nullable=True)
+    error_message = db.Column(db.Text, nullable=True,
+                              comment='错误信息（执行失败时记录）')
 
     # 执行时间
-    executed_at = db.Column(db.DateTime, default=datetime.utcnow)
-    completed_at = db.Column(db.DateTime, nullable=True)  # 完成时间（对于waiting节点是恢复时间）
+    executed_at = db.Column(db.DateTime, default=datetime.utcnow,
+                            comment='开始执行时间')
+    completed_at = db.Column(db.DateTime, nullable=True,
+                             comment='完成时间（对于waiting节点是恢复时间）')
 
     # 耗时（毫秒）
-    duration_ms = db.Column(db.Integer, nullable=True)
+    duration_ms = db.Column(db.Integer, nullable=True,
+                            comment='执行耗时（毫秒）')
 
-
-NodeExecution.__repr__ = lambda self: f'<NodeExecution {self.node_type} {self.node_id} {self.result}>'
+    def __repr__(self):
+        return f'<NodeExecution {self.node_type} {self.node_id} {self.result}>'

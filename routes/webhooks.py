@@ -7,6 +7,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, EmailEvent, Workflow, WorkflowInstance, EmailLog, EmailTemplate, Contact, ContactGroup
 from routes.email import send_email
 from services.scheduler import schedule_relative_delay, schedule_absolute_delay, get_scheduled_jobs, cancel_scheduled_job
+from utils.sns_handler import handle_sns_message
 
 webhooks_bp = Blueprint('webhooks', __name__)
 
@@ -41,22 +42,32 @@ def handle_sns():
     # SNS 发送的请求 Content-Type 是 text/plain，需要强制解析 JSON
     # 参考: https://docs.aws.amazon.com/sns/latest/dg/http-subscription-confirmation-json.html
     data = None
-    
+
+    # 记录请求信息
+    current_app.logger.info("=" * 60)
+    current_app.logger.info("[SNS] Webhook received")
+    current_app.logger.info(f"[SNS] Content-Type: {request.content_type}")
+    current_app.logger.info(f"[SNS] Headers: {dict(request.headers)}")
+
     # 首先尝试强制解析 JSON（忽略 Content-Type）
     try:
         data = request.get_json(force=True, silent=True)
     except Exception:
         pass
-    
+
     # 如果失败，尝试直接读取请求体并解析
     if not data:
         try:
             raw_data = request.get_data(as_text=True)
+            current_app.logger.info(f"[SNS] Raw request body:\n{raw_data}")
             if raw_data:
                 data = json.loads(raw_data)
         except Exception as e:
             current_app.logger.error(f"[SNS] Failed to parse request body: {e}")
-    
+    else:
+        # 记录解析后的数据
+        current_app.logger.info(f"[SNS] Parsed request data:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+
     if not data:
         current_app.logger.error(f"[SNS] No data received. Content-Type: {request.content_type}")
         return jsonify(msg='No data received'), 400
@@ -123,32 +134,45 @@ def handle_sns():
         status='waiting_event'
     ).first()
 
+    # 获取 SNS MessageId 用于去重
+    sns_message_id = data.get('MessageId')
+
     if not instance:
-        # 没有找到等待的实例，只记录事件
+        # 没有找到等待的实例，只记录事件（带去重和延迟监控）
         print(f"[SNS] No waiting instance found for message_id: {message_id}")
-        
+
         # 尝试从邮件日志获取 user_id
         email_log = EmailLog.query.filter_by(message_id=message_id).first()
         user_id = email_log.user_id if email_log else 1
 
-        event = EmailEvent(
-            user_id=user_id,
+        # 使用新的消息处理函数（带去重和延迟监控）
+        event, is_duplicate, delay_seconds = handle_sns_message(
+            sns_message_id=sns_message_id,
             message_id=message_id,
             event_type=event_type,
             recipient_email=recipient_email,
-            event_data=sns_message,
-            occurred_at=datetime.utcnow()
+            sns_message_data=sns_message,
+            user_id=user_id,
+            instance_id=email_log.instance_id if email_log else None
         )
-        if email_log:
-            event.source_event_id = email_log.id
-            event.instance_id = email_log.instance_id
-        db.session.add(event)
-        db.session.commit()
 
-        return jsonify(msg='Event received but no waiting instance', event_id=event.id), 200
+        if is_duplicate:
+            return jsonify(
+                msg='Duplicate event ignored',
+                event_id=event.id if event else None,
+                sns_message_id=sns_message_id
+            ), 200
 
-    # 检查事件类型是否匹配
-    if instance.waiting_event_type and instance.waiting_event_type != event_type:
+        return jsonify(
+            msg='Event received but no waiting instance',
+            event_id=event.id,
+            delay_seconds=delay_seconds
+        ), 200
+
+    # 检查事件类型是否匹配（忽略大小写）
+    waiting_event = instance.waiting_event_type.lower() if instance.waiting_event_type else None
+    received_event = event_type.lower() if event_type else None
+    if waiting_event and waiting_event != received_event:
         print(f"[SNS] Event type mismatch: waiting {instance.waiting_event_type}, got {event_type}")
         return jsonify(msg=f'Event type mismatch, waiting for {instance.waiting_event_type}'), 200
 
@@ -172,24 +196,29 @@ def handle_sns():
         print(f"[SNS] Conditions not met for instance {instance.id}")
         return jsonify(msg='Conditions not met'), 200
 
-    # 记录事件
-    event = EmailEvent(
-        user_id=instance.user_id,
-        instance_id=instance.id,
+    # 使用新的消息处理函数（带去重和延迟监控）
+    event, is_duplicate, delay_seconds = handle_sns_message(
+        sns_message_id=sns_message_id,
         message_id=message_id,
         event_type=event_type,
         recipient_email=recipient_email,
-        event_data=sns_message,
-        occurred_at=datetime.utcnow()
+        sns_message_data=sns_message,
+        user_id=instance.user_id,
+        instance_id=instance.id
     )
-    db.session.add(event)
-    db.session.commit()
+
+    if is_duplicate:
+        return jsonify(
+            msg='Duplicate event ignored',
+            event_id=event.id if event else None,
+            sns_message_id=sns_message_id
+        ), 200
 
     print(f"[SNS] Event matches instance {instance.id}, triggering continuation")
-    
+
     # 触发实例继续执行
     mock_send = current_app.config.get('MOCK_EMAIL_SEND', False)
-    result = continue_instance_execution(instance, sns_message, mock_send)
+    result = continue_instance_execution(instance, sns_message, mock_send, source_event_id=event.id)
 
     return jsonify(
         msg='Event processed, instance triggered',
@@ -199,9 +228,17 @@ def handle_sns():
     ), 200
 
 
-def continue_instance_execution(instance, event_data, mock_send=False):
-    """恢复实例执行 - 支持并行路径"""
+def continue_instance_execution(instance, event_data, mock_send=False, source_event_id=None):
+    """恢复实例执行 - 支持并行路径
+
+    Args:
+        instance: WorkflowInstance 对象
+        event_data: 触发恢复的事件数据
+        mock_send: 是否模拟发送
+        source_event_id: 触发恢复的事件ID，用于记录到 EmailLog
+    """
     from routes.workflow import execute_node_for_instance, evaluate_condition
+    from models import NodeExecution
     import json
 
     # 解析工作流
@@ -227,12 +264,12 @@ def continue_instance_execution(instance, event_data, mock_send=False):
     node_data = current_node.get('data', {})
     node_type = node_data.get('nodeType', 'email')
 
-    # 更新状态
-    instance.status = 'running'
-    instance.waiting_event_type = None
-    instance.waiting_conditions = None
-    instance.waiting_since = None
-    db.session.commit()
+    # 从数据库加载已执行的节点（避免重复执行）
+    executed_nodes = set()
+    node_executions = NodeExecution.query.filter_by(instance_id=instance.id).all()
+    for ne in node_executions:
+        executed_nodes.add(ne.node_id)
+    print(f"[Instance {instance.id}] Already executed nodes: {executed_nodes}")
 
     # Driver 节点处理
     if node_type == 'driver':
@@ -243,6 +280,9 @@ def continue_instance_execution(instance, event_data, mock_send=False):
 
         # 验证条件
         condition_passed = True
+        has_delay_step = False
+        delay_config = None
+
         for step_id in enabled_steps:
             step = step_config.get(step_id, {})
 
@@ -255,13 +295,17 @@ def continue_instance_execution(instance, event_data, mock_send=False):
                     condition_passed = False
                     break
 
+            elif step_id == 'delay' and step.get('enabled'):
+                has_delay_step = True
+                delay_config = step
+
         if not condition_passed:
             instance.status = 'completed'
             instance.completed_at = datetime.utcnow()
             db.session.commit()
             return {'status': 'completed', 'reason': 'conditions_not_met'}
 
-        # 找到后续节点（可能有多个并行分支）
+        # 找到后续节点
         next_ids = next_map.get(current_node_id, [])
         if not next_ids:
             instance.status = 'completed'
@@ -269,15 +313,93 @@ def continue_instance_execution(instance, event_data, mock_send=False):
             db.session.commit()
             return {'status': 'completed', 'reason': 'no_more_nodes'}
 
-        # 执行后续节点 - 支持并行路径
+        # 如果有延时步骤，调度延时任务而不是立即执行
+        if has_delay_step and delay_config:
+            print(f"[Instance {instance.id}] Delay step enabled, scheduling delay task")
+            delay_type = delay_config.get('delayType', 'relative')
+            recipient = instance.recipient_email
+
+            for next_id in next_ids:
+                next_node = node_map.get(next_id)
+                if next_node and next_node.get('data', {}).get('nodeType') == 'email':
+                    # 检查该节点是否已经被执行过（避免重复调度）
+                    if next_id in executed_nodes:
+                        print(f"[Instance {instance.id}] Node {next_id} already executed, skipping delay schedule")
+                        continue
+
+                    # 构建包含id的node_data
+                    node_data_with_id = next_node.get('data', {}).copy()
+                    node_data_with_id['id'] = next_id
+
+                    # 保存 source_event_id 和 event_data 到实例上下文
+                    if source_event_id:
+                        from sqlalchemy.orm.attributes import flag_modified
+                        instance.context = instance.context or {}
+                        instance.context['delayed_source_event_id'] = source_event_id
+                        instance.context['delayed_event_data'] = event_data
+                        flag_modified(instance, 'context')
+                        db.session.commit()
+                        print(f"[Instance {instance.id}] Saved event context: source_event_id={source_event_id}")
+
+                    if delay_type == 'relative':
+                        delay_value = delay_config.get('delayValue', 1)
+                        delay_unit = delay_config.get('delayUnit', 'hours')
+                        job_id = schedule_relative_delay(
+                            instance.workflow_id,
+                            instance.id,
+                            node_data_with_id,
+                            delay_value,
+                            delay_unit,
+                            recipient,
+                            mock_send
+                        )
+                        if job_id:
+                            from sqlalchemy.orm.attributes import flag_modified
+                            instance.status = 'delayed'
+                            instance.context = instance.context or {}
+                            instance.context['scheduled_job_id'] = job_id
+                            flag_modified(instance, 'context')
+                            db.session.commit()
+                            print(f"[Instance {instance.id}] Scheduled relative delay: {delay_value} {delay_unit}")
+                    else:
+                        delay_datetime = delay_config.get('delayDateTime')
+                        job_id = schedule_absolute_delay(
+                            instance.workflow_id,
+                            instance.id,
+                            node_data_with_id,
+                            delay_datetime,
+                            recipient,
+                            mock_send
+                        )
+                        if job_id:
+                            from sqlalchemy.orm.attributes import flag_modified
+                            instance.status = 'delayed'
+                            instance.context = instance.context or {}
+                            instance.context['scheduled_job_id'] = job_id
+                            flag_modified(instance, 'context')
+                            db.session.commit()
+                            print(f"[Instance {instance.id}] Scheduled absolute delay: {delay_datetime}")
+
+            # 延时任务已调度，不立即执行后续节点
+            return {'status': 'delayed', 'reason': 'delay_scheduled'}
+
+        # 没有延时步骤，继续执行后续节点
+        # 更新状态为运行中（在确认没有延时步骤后）
+        instance.status = 'running'
+        instance.waiting_event_type = None
+        instance.waiting_conditions = None
+        instance.waiting_since = None
+        db.session.commit()
+
         active_nodes = []
         for next_id in next_ids:
             next_node = node_map.get(next_id)
-            if next_node:
+            if next_node and next_node.get('id') not in executed_nodes:
                 active_nodes.append(next_node)
 
         # 遍历所有活跃节点（支持并行分支）
-        visited = set([current_node_id])
+        visited = executed_nodes.copy()
+        visited.add(current_node_id)
         paused_branches = []
 
         while active_nodes:
@@ -285,17 +407,19 @@ def continue_instance_execution(instance, event_data, mock_send=False):
             node_id = node.get('id')
 
             if node_id in visited:
+                print(f"[Instance {instance.id}] Skipping already executed node: {node_id}")
                 continue
             visited.add(node_id)
 
-            # 执行节点
+            # 执行节点，传递 source_event_id 和 event_data
             should_continue = execute_node_for_instance(
                 instance, node, node_map, next_map,
-                instance.user_id, mock_send
+                instance.user_id, mock_send,
+                resumed_event_data=event_data,
+                source_event_id=source_event_id
             )
 
             if not should_continue:
-                # 节点暂停，记录但不停止其他分支
                 paused_branches.append({
                     'node_id': node_id,
                     'status': instance.status
@@ -317,17 +441,27 @@ def continue_instance_execution(instance, event_data, mock_send=False):
             instance.completed_at = datetime.utcnow()
             db.session.commit()
 
-    return {
-        'status': instance.status,
-        'current_node': instance.current_node_id,
-        'branches_paused': len(paused_branches) if 'paused_branches' in locals() else 0
-    }
+        return {
+            'status': instance.status,
+            'current_node': instance.current_node_id,
+            'branches_paused': len(paused_branches) if paused_branches else 0
+        }
+
+    # 如果不是 driver 节点，继续正常执行
+    instance.status = 'running'
+    instance.waiting_event_type = None
+    instance.waiting_conditions = None
+    instance.waiting_since = None
+    db.session.commit()
+
+    return {'status': instance.status, 'reason': 'not_driver_node'}
+
 
 
 @webhooks_bp.route('/simulate/event', methods=['POST'])
 @jwt_required()
 def simulate_event():
-    """模拟邮件事件（用于测试和调试）"""
+    """模拟邮件事件（用于测试和调试）- 现在与SNS处理逻辑一致"""
     uid = int(get_jwt_identity())
     data = request.get_json()
 
@@ -355,33 +489,53 @@ def simulate_event():
     else:
         occurred_time = datetime.utcnow()
 
-    # 查找对应的邮件日志获取 user_id 和工作流关联
-    email_log = None
-    if message_id:
-        email_log = EmailLog.query.filter_by(message_id=message_id).first()
-    if not email_log:
-        email_log = EmailLog.query.filter_by(recipient_email=recipient_email).first()
-    actual_uid = uid if not email_log else email_log.user_id
+    # 查找等待该事件的实例（与SNS处理逻辑一致）
+    instance = WorkflowInstance.query.filter_by(
+        message_id=message_id,
+        recipient_email=recipient_email,
+        status='waiting_event'
+    ).first()
+
+    # 查找邮件日志获取 user_id
+    email_log = EmailLog.query.filter_by(message_id=message_id).first()
+    actual_uid = email_log.user_id if email_log else uid
 
     # 存储事件
     event = EmailEvent(
         user_id=actual_uid,
+        instance_id=instance.id if instance else None,
         message_id=message_id,
         event_type=event_type.lower(),
         recipient_email=recipient_email,
         event_data=event_data,
         occurred_at=occurred_time
     )
+    if email_log:
+        event.source_email_log_id = email_log.id
     db.session.add(event)
     db.session.commit()
 
-    # 触发工作流（传递 mock_send 参数和邮件关联信息）
-    email_log = EmailLog.query.filter_by(message_id=message_id).first()
-    wf_id = email_log.workflow_id if email_log else None
-    nd_id = email_log.node_id if email_log else None
-    triggered_workflows = trigger_workflows(event_type.lower(), message_id, recipient_email, event_data, mock_send, wf_id, nd_id)
+    # 如果没有等待的实例，只记录事件
+    if not instance:
+        print(f"[Simulate] No waiting instance found for message_id: {message_id}")
+        return jsonify(msg='Event simulated but no waiting instance', event_id=event.id), 200
 
-    return jsonify(msg='Event simulated', event_id=event.id, triggered_workflows=triggered_workflows, mock_send=mock_send), 200
+    # 检查事件类型是否匹配
+    if instance.waiting_event_type and instance.waiting_event_type != event_type.lower():
+        print(f"[Simulate] Event type mismatch: waiting {instance.waiting_event_type}, got {event_type}")
+        return jsonify(msg=f'Event type mismatch, waiting for {instance.waiting_event_type}'), 200
+
+    print(f"[Simulate] Event matches instance {instance.id}, triggering continuation")
+
+    # 触发实例继续执行（与SNS处理逻辑完全一致）
+    result = continue_instance_execution(instance, event_data, mock_send, source_event_id=event.id)
+
+    return jsonify(
+        msg='Event processed, instance triggered',
+        event_id=event.id,
+        instance_id=instance.id,
+        result=result
+    ), 200
 
 
 def trigger_workflows(event_type, message_id, recipient_email, event_data, mock_send=False, workflow_id=None, node_id=None):

@@ -60,3 +60,14 @@ class Config:
     # CSRF 配置
     WTF_CSRF_ENABLED = os.environ.get('WTF_CSRF_ENABLED', 'false').lower() == 'true'
     WTF_CSRF_SECRET_KEY = os.environ.get('WTF_CSRF_SECRET_KEY')
+
+    # SNS 回调配置
+    # 消息去重：保存已处理消息ID的天数
+    SNS_DEDUP_DAYS = int(os.environ.get('SNS_DEDUP_DAYS', '30'))
+
+    # 回调延迟告警阈值（秒）
+    SNS_DELAY_THRESHOLD_SECONDS = int(os.environ.get('SNS_DELAY_THRESHOLD_SECONDS', '60'))
+
+    # Redis 配置（用于消息去重，可选）
+    REDIS_ENABLED = os.environ.get('REDIS_ENABLED', 'false').lower() in ('true', '1', 'yes')
+    REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')

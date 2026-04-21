@@ -78,7 +78,7 @@ def get_instance(iid):
     # 获取执行历史
     logs = EmailLog.query.filter_by(instance_id=iid).order_by(EmailLog.sent_at.desc()).all()
     events = EmailEvent.query.filter_by(instance_id=iid).order_by(EmailEvent.created_at.desc()).all()
-    node_execs = NodeExecution.query.filter_by(instance_id=iid).order_by(NodeExecution.executed_at.desc()).all()
+    node_execs = NodeExecution.query.filter_by(instance_id=iid).order_by(NodeExecution.executed_at.desc(), NodeExecution.id.desc()).all()
 
     return jsonify({
         'instance': instance_to_dict(instance),
