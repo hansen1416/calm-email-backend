@@ -5,38 +5,63 @@ from config import Config
 from models import db
 import logging
 import sys
+import os
 from datetime import datetime
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+
+    # 手动配置 SQLAlchemy 引擎选项 - 必须在 db.init_app 之前设置
+    # 这些选项会覆盖 config.py 中的 SQLALCHEMY_ENGINE_OPTIONS
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_pre_ping': True,        # 使用前 ping 检查连接是否有效
+        'pool_recycle': 280,          # 280秒回收连接（小于MySQL默认wait_timeout 300）
+        'pool_size': 10,              # 基础连接池大小
+        'max_overflow': 20,           # 最大溢出连接数
+        'pool_timeout': 30,           # 获取连接超时时间（秒）
+        'echo': False,                # 关闭SQL日志
+    }
     
-    # 配置结构化日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('app.log', encoding='utf-8')
-        ]
-    )
-    
+    # 设置MySQL连接参数
+    app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args'] = {
+        'connect_timeout': 10,        # 连接超时（秒）
+        'read_timeout': 30,          # 读超时（秒）
+        'write_timeout': 30,         # 写超时（秒）
+        'charset': 'utf8mb4',
+        'autocommit': False,
+    }
+
+    # 只在非 gunicorn 环境下配置日志
+    # gunicorn 会自己管理日志配置
+    if not os.environ.get('GUNICORN_WORKER'):
+        # 配置结构化日志
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                logging.FileHandler('app.log', encoding='utf-8')
+            ]
+        )
+
     # 设置各模块日志级别
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
     logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
-    
+
     # 请求日志中间件
     @app.before_request
     def log_request():
         from flask import request
-        app.logger.info(f"[{request.method}] {request.path} - {request.remote_addr}")
-    
+        # 使用标准 logging 而不是 app.logger
+        logging.getLogger('app').info(f"[{request.method}] {request.path} - {request.remote_addr}")
+
     # 响应日志中间件
     @app.after_request
     def log_response(response):
         from flask import request
-        app.logger.info(f"[{request.method}] {request.path} - Status: {response.status_code}")
+        logging.getLogger('app').info(f"[{request.method}] {request.path} - Status: {response.status_code}")
         return response
     
     # CORS 配置（生产环境应限制域名）
@@ -47,7 +72,7 @@ def create_app():
             "allow_headers": ["Content-Type", "Authorization"]
         }
     }, supports_credentials=True)
-    
+
     db.init_app(app)
     JWTManager(app)
     
@@ -82,10 +107,20 @@ def create_app():
         # 配置数据库存储并启动
         init_scheduler(app)
         app.logger.info("[Scheduler] Scheduler started successfully")
-        
+
         # 创建数据库表
-        db.create_all()
-        app.logger.info("[Database] Tables created")
+        try:
+            db.create_all()
+            app.logger.info("[Database] Tables created")
+        except Exception as e:
+            app.logger.error(f"[Database] Error creating tables: {e}")
+            # 尝试回滚并重新创建
+            try:
+                db.session.rollback()
+                db.create_all()
+                app.logger.info("[Database] Tables created after rollback")
+            except Exception as e2:
+                app.logger.error(f"[Database] Failed to create tables: {e2}")
 
     return app
 
@@ -93,6 +128,34 @@ def create_app():
 def register_error_handlers(app):
     """注册全局错误处理器"""
     
+    # 处理数据库连接错误
+    @app.errorhandler(Exception)
+    def handle_db_connection_error(error):
+        """处理数据库连接错误，尝试清理会话并重试"""
+        error_msg = str(error)
+        if 'Lost connection to MySQL server' in error_msg or 'MySQL server has gone away' in error_msg:
+            # 记录错误但返回友好的响应
+            from models import db
+            try:
+                db.session.rollback()
+                db.session.remove()
+            except:
+                pass
+            app.logger.warning(f"[DB] Connection lost, session cleaned up: {error_msg[:100]}")
+            return jsonify({
+                'success': False,
+                'code': 'DB_CONNECTION_LOST',
+                'message': 'Database connection lost, please retry'
+            }), 503  # Service Unavailable
+        
+        # 其他未处理的异常
+        app.logger.error(f"Unhandled Exception: {str(error)}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'code': 'INTERNAL_ERROR',
+            'message': 'An unexpected error occurred'
+        }), 500
+
     @app.errorhandler(400)
     def bad_request(error):
         app.logger.warning(f"Bad Request: {str(error)}")

@@ -6,7 +6,7 @@ backlog = 2048
 
 # 工作进程
 workers = multiprocessing.cpu_count() * 2
-worker_class = "gevent"
+worker_class = "gthread"
 worker_connections = 1000
 timeout = 30
 keepalive = 5
@@ -27,4 +27,4 @@ loglevel = "info"
 # 性能优化
 max_requests = 1000
 max_requests_jitter = 100
-preload_app = True
+preload_app = False  # 禁用预加载，避免数据库连接被多个 worker 共享导致 "Lost connection" 错误

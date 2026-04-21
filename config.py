@@ -32,6 +32,18 @@ class Config:
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
+    # SQLAlchemy 连接池配置 - 防止 "Lost connection to MySQL server" 错误
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_pre_ping': True,        # 使用前 ping 检查连接是否有效
+        'pool_recycle': 3600,         # 1小时后回收连接（避免 MySQL wait_timeout）
+        'pool_size': 10,              # 基础连接池大小
+        'max_overflow': 20,           # 最大溢出连接数
+        'pool_timeout': 30,           # 获取连接超时时间（秒）
+        'connect_args': {
+            'connect_timeout': 10,    # 连接超时（秒）
+        }
+    }
+
     # AWS SES 配置
     # ⚠️ 生产环境必须通过环境变量设置，不要硬编码凭证
     AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
