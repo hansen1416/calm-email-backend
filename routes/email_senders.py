@@ -20,6 +20,90 @@ def generate_verification_code():
     return ''.join(random.choices(string.digits, k=6))
 
 
+def send_verification_code_email(to_email, code, user_email=None):
+    """
+    发送6位验证码邮件到用户邮箱
+    
+    Args:
+        to_email: 目标邮箱地址
+        code: 6位验证码
+        user_email: 用户当前登录邮箱（可选）
+    
+    Returns:
+        tuple: (success, message_id or error_message)
+    """
+    cfg = current_app.config
+    
+    # 邮件主题和内容
+    subject = "您的验证码 - Contact Mail System"
+    body_html = f"""
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; background-color: #f5f5f5; }}
+            .container {{ max-width: 500px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 8px; }}
+            .code {{ font-size: 32px; font-weight: bold; color: #409EFF; letter-spacing: 8px; text-align: center; padding: 20px; background-color: #f0f9ff; border-radius: 4px; margin: 20px 0; }}
+            .footer {{ color: #999; font-size: 12px; margin-top: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>邮箱验证</h2>
+            <p>您好！</p>
+            <p>您正在为 <strong>{to_email}</strong> 申请发件邮箱绑定，请使用以下验证码完成验证：</p>
+            <div class="code">{code}</div>
+            <p>此验证码将在 <strong>10分钟</strong> 后过期。</p>
+            <p>如果您没有申请此操作，请忽略此邮件。</p>
+            <div class="footer">
+                <p>Contact Mail System</p>
+                <p>此邮件由系统自动发送，请勿回复</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    # 强制使用 .env 中配置的 SES_SENDER_EMAIL 作为发件人
+    # 验证码邮件必须从系统固定邮箱发送，不能让用户自己发给自己
+    source = cfg.get('SES_SENDER_EMAIL', 'noreply@example.com')
+    if not source or source == 'noreply@example.com':
+        print(f"[ERROR] SES_SENDER_EMAIL not configured in .env")
+        return False, "系统发件邮箱未配置，请在 .env 中设置 SES_SENDER_EMAIL"
+
+    # 如果配置了MOCK模式，使用模拟发送
+    if cfg.get('MOCK_EMAIL_SEND', False):
+        print(f"[MOCK] 发送验证码邮件到 {to_email}, 验证码: {code}")
+        return True, "mock-verification-code"
+    
+    try:
+        client = boto3.client(
+            'ses',
+            region_name=cfg['AWS_REGION'],
+            aws_access_key_id=cfg['AWS_ACCESS_KEY_ID'],
+            aws_secret_access_key=cfg['AWS_SECRET_ACCESS_KEY']
+        )
+        
+        response = client.send_email(
+            Source=source,
+            Destination={'ToAddresses': [to_email]},
+            Message={
+                'Subject': {'Data': subject, 'Charset': 'UTF-8'},
+                'Body': {'Html': {'Data': body_html, 'Charset': 'UTF-8'}}
+            }
+        )
+        
+        print(f"[SES] 验证码邮件发送成功! MessageId: {response.get('MessageId')}")
+        return True, response.get('MessageId')
+        
+    except ClientError as e:
+        error_message = e.response['Error']['Message']
+        print(f"[SES] 验证码邮件发送失败: {error_message}")
+        return False, f"SES错误: {error_message}"
+    except Exception as e:
+        print(f"[SES] 验证码邮件发送失败 (非AWS异常): {str(e)}")
+        return False, f"发送失败: {str(e)}"
+
+
 def check_email_exists_for_other_user(email, user_id):
     """检查邮箱是否已被其他用户绑定"""
     existing = UserSenderBinding.query.filter(
@@ -396,7 +480,7 @@ def get_quota():
     next_reset = now.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
     if now >= next_reset:
         next_reset = next_reset + timedelta(days=1)
-    
+
     return jsonify({
         'has_binding': True,
         'email': binding.email,
@@ -407,3 +491,46 @@ def get_quota():
         'reset_at': next_reset.isoformat(),
         'using_system_default': False
     }), 200
+
+
+@email_senders_bp.route('/senders/<int:binding_id>/send-code', methods=['POST'])
+@jwt_required()
+def send_verification_code(binding_id):
+    """
+    弹窗时发送6位验证码邮件
+    用户点击"验证"按钮打开弹窗时调用，发送验证码到绑定邮箱
+    """
+    uid = int(get_jwt_identity())
+    
+    binding = UserSenderBinding.query.filter_by(
+        id=binding_id,
+        user_id=uid,
+        is_active=True
+    ).first()
+    
+    if not binding:
+        return jsonify(msg='绑定记录不存在'), 404
+    
+    if binding.ses_identity_status == 'verified':
+        return jsonify(msg='该邮箱已验证'), 400
+    
+    # 生成新验证码（或复用未过期的）
+    if binding.token_expires_at and binding.token_expires_at > datetime.utcnow() and binding.verification_token:
+        code = binding.verification_token
+    else:
+        code = generate_verification_code()
+        binding.verification_token = code
+        binding.token_expires_at = datetime.utcnow() + timedelta(minutes=10)
+        db.session.commit()
+    
+    # 发送验证码邮件
+    success, result = send_verification_code_email(binding.email, code)
+    
+    if success:
+        return jsonify({
+            'msg': '验证码已发送，请查收邮件',
+            'email': binding.email,
+            'expires_in': 600
+        }), 200
+    else:
+        return jsonify(msg=f'验证码发送失败: {result}'), 500
