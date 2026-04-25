@@ -103,24 +103,36 @@ def increment_sender_quota(binding):
     db.session.commit()
 
 
-def send_ses_email(to_email, subject, body_html, source=None, reply_to=None):
+def send_ses_email(to_email, subject, body_html, source=None, reply_to=None, binding=None):
     """
     使用 AWS SES 发送邮件，支持自定义发件人和 Reply-To
     M4: 改造支持双模式
+    M4-extension: 支持 Configuration Set 配置集
     """
     cfg = current_app.config
-    
+
     # 使用传入的 source 或系统默认
     if not source:
         source = cfg.get('SES_SENDER_EMAIL', 'noreply@example.com')
-    
+
     print(f"\n{'='*60}")
     print(f"[SES] 准备发送邮件:")
     print(f" 发件人: {source}")
-    print(f" Reply-To: {reply_to or 'None'}")
-    print(f" 收件人: {to_email}")
-    print(f" 主题: {subject}")
-    print(f" AWS Region: {cfg['AWS_REGION']}")
+    print(f"  Reply-To: {reply_to or 'None'}")
+    print(f"  收件人: {to_email}")
+    print(f"  主题: {subject}")
+    print(f"  AWS Region: {cfg['AWS_REGION']}")
+
+    # 配置集优先级：binding > 全局 > 无
+    config_set = None
+    if binding and binding.configuration_set_name:
+        config_set = binding.configuration_set_name
+        print(f"  ConfigurationSet (from binding): {config_set}")
+    else:
+        config_set = cfg.get('SES_CONFIGURATION_SET_NAME')
+        if config_set:
+            print(f"  ConfigurationSet (from global): {config_set}")
+
     print(f"{'='*60}")
 
     client = boto3.client(
@@ -138,11 +150,15 @@ def send_ses_email(to_email, subject, body_html, source=None, reply_to=None):
                 'Body': {'Html': {'Data': body_html, 'Charset': 'UTF-8'}}
             }
         }
-        
+
         # 添加 Reply-To
         if reply_to:
             kwargs['ReplyToAddresses'] = [reply_to]
-        
+
+        # 添加 Configuration Set（如配置）
+        if config_set:
+            kwargs['ConfigurationSetName'] = config_set
+
         response = client.send_email(**kwargs)
         print(f"[SES] 发送成功! MessageId: {response.get('MessageId')}")
         return True, response.get('MessageId')
@@ -259,7 +275,7 @@ def send_email_with_binding(user_id, to_email, subject, body_html, sender_bindin
     if use_mock:
         ok, msg_id = send_mock_email(to_email, subject, body_html, source=source)
     else:
-        ok, msg_id = send_ses_email(to_email, subject, body_html, source=source, reply_to=reply_to)
+        ok, msg_id = send_ses_email(to_email, subject, body_html, source=source, reply_to=reply_to, binding=binding)
     
     # 更新配额计数
     if ok and binding:

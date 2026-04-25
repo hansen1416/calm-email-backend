@@ -506,12 +506,16 @@ class UserSenderBinding(db.Model):
     
     # 使用统计（每日重置）
     daily_sent = db.Column(db.Integer, default=0,
-                           comment='今日已发送数量')
+                          comment='今日已发送数量')
     daily_reset_at = db.Column(db.DateTime, nullable=True,
-                               comment='配额重置时间')
-    
+                              comment='配额重置时间')
+
+    # SES Configuration Set（预留字段，用于邮件事件追踪）
+    configuration_set_name = db.Column(db.String(100), nullable=True,
+                                        comment='SES配置集名称（预留，优先于全局配置）')
+
     is_default = db.Column(db.Boolean, default=False,
-                         comment='是否默认发件邮箱')
+                          comment='是否默认发件邮箱')
     is_active = db.Column(db.Boolean, default=True,
                           comment='是否启用')
     

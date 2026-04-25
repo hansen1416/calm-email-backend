@@ -80,6 +80,11 @@ class Config:
     # 回调延迟告警阈值（秒）
     SNS_DELAY_THRESHOLD_SECONDS = int(os.environ.get('SNS_DELAY_THRESHOLD_SECONDS', '60'))
 
+    # SES Configuration Set（可选）
+    # 用于邮件事件追踪（打开、点击、送达等）
+    # 在 AWS SES 控制台创建配置集后填写名称
+    SES_CONFIGURATION_SET_NAME = os.environ.get('SES_CONFIGURATION_SET_NAME', '')
+
     # Redis 配置（用于消息去重，可选）
     REDIS_ENABLED = os.environ.get('REDIS_ENABLED', 'false').lower() in ('true', '1', 'yes')
     REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
