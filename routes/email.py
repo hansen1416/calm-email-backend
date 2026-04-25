@@ -1,19 +1,22 @@
 import traceback
 import uuid
+import json
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, EmailTemplate, EmailLog, Contact, ContactGroup
+from models import db, EmailTemplate, EmailLog, Contact, ContactGroup, UserSenderBinding
 import boto3
 from botocore.exceptions import ClientError
+from datetime import datetime
 
 email_bp = Blueprint('email', __name__)
 
 
-def send_mock_email(to_email, subject, body_html):
+def send_mock_email(to_email, subject, body_html, source="mock@example.com"):
     """模拟邮件发送，仅记录日志不真实发送"""
     msg_id = f"mock-{uuid.uuid4().hex[:16]}"
     print(f"\n{'='*60}")
     print(f"[MOCK] 模拟发送邮件:")
+    print(f" 发件人: {source}")
     print(f" 收件人: {to_email}")
     print(f" 主题: {subject}")
     print(f" 模拟MessageId: {msg_id}")
@@ -22,16 +25,102 @@ def send_mock_email(to_email, subject, body_html):
     return True, msg_id
 
 
-def send_ses_email(to_email, subject, body_html):
-    """使用 AWS SES 发送邮件，包含详细的错误处理"""
+def get_sender_for_user(user_id, sender_binding_id=None):
+    """
+    获取用户的发件邮箱
+    M4: 支持双模式 (personal/system)
+    
+    优先级:
+    1. 如果指定了 binding_id，使用该绑定
+    2. 否则使用用户的默认绑定
+    3. 否则使用系统默认发件人
+    
+    Returns:
+        tuple: (binding, source_email, reply_to_email)
+               binding 可能为 None
+    """
     cfg = current_app.config
+    sender_mode = cfg.get('EMAIL_SENDER_MODE', 'personal')
+    
+    binding = None
+    
+    # 1. 查找指定的或默认的绑定
+    if sender_binding_id:
+        binding = UserSenderBinding.query.filter_by(
+            id=sender_binding_id,
+            user_id=user_id,
+            is_active=True
+        ).first()
+    
+    if not binding:
+        binding = UserSenderBinding.query.filter_by(
+            user_id=user_id,
+            is_default=True,
+            is_active=True
+        ).first()
+    
+    # 2. 检查配额
+    if binding:
+        if not check_sender_quota(binding):
+            return None, None, None, "Daily quota exceeded"
+        
+        source_email = binding.email
+        reply_to_email = binding.real_email if binding.email_type == 'system' else None
+        return binding, source_email, reply_to_email, None
+    
+    # 3. 使用系统默认
+    default_sender = cfg.get('SES_DEFAULT_SENDER', 'noreply@example.com')
+    return None, default_sender, None, None
+
+
+def check_sender_quota(binding):
+    """检查配额是否充足"""
+    from datetime import timedelta
+    
+    # 每日重置
+    if binding.daily_reset_at and binding.daily_reset_at.date() < datetime.utcnow().date():
+        binding.daily_sent = 0
+        binding.daily_reset_at = datetime.utcnow()
+        db.session.commit()
+    
+    # 获取限额
+    limit = binding.custom_daily_limit
+    if limit is None and binding.quota_config_id:
+        from models import EmailQuotaConfig
+        quota_config = EmailQuotaConfig.query.get(binding.quota_config_id)
+        if quota_config:
+            limit = quota_config.daily_limit
+    if limit is None:
+        limit = current_app.config.get('DEFAULT_DAILY_QUOTA', 100)
+    
+    return binding.daily_sent < limit
+
+
+def increment_sender_quota(binding):
+    """增加已发送计数"""
+    binding.daily_sent += 1
+    binding.daily_reset_at = datetime.utcnow()
+    db.session.commit()
+
+
+def send_ses_email(to_email, subject, body_html, source=None, reply_to=None):
+    """
+    使用 AWS SES 发送邮件，支持自定义发件人和 Reply-To
+    M4: 改造支持双模式
+    """
+    cfg = current_app.config
+    
+    # 使用传入的 source 或系统默认
+    if not source:
+        source = cfg.get('SES_SENDER_EMAIL', 'noreply@example.com')
+    
     print(f"\n{'='*60}")
     print(f"[SES] 准备发送邮件:")
+    print(f" 发件人: {source}")
+    print(f" Reply-To: {reply_to or 'None'}")
     print(f" 收件人: {to_email}")
     print(f" 主题: {subject}")
-    print(f" 发件人: {cfg['SES_SENDER_EMAIL']}")
     print(f" AWS Region: {cfg['AWS_REGION']}")
-    print(f" AWS Key ID: {cfg['AWS_ACCESS_KEY_ID'][:8]}...")
     print(f"{'='*60}")
 
     client = boto3.client(
@@ -39,29 +128,36 @@ def send_ses_email(to_email, subject, body_html):
         aws_access_key_id=cfg['AWS_ACCESS_KEY_ID'],
         aws_secret_access_key=cfg['AWS_SECRET_ACCESS_KEY']
     )
+    
     try:
-        response = client.send_email(
-            Source=cfg['SES_SENDER_EMAIL'],
-            Destination={'ToAddresses': [to_email]},
-            Message={
+        kwargs = {
+            'Source': source,
+            'Destination': {'ToAddresses': [to_email]},
+            'Message': {
                 'Subject': {'Data': subject, 'Charset': 'UTF-8'},
                 'Body': {'Html': {'Data': body_html, 'Charset': 'UTF-8'}}
             }
-        )
+        }
+        
+        # 添加 Reply-To
+        if reply_to:
+            kwargs['ReplyToAddresses'] = [reply_to]
+        
+        response = client.send_email(**kwargs)
         print(f"[SES] 发送成功! MessageId: {response.get('MessageId')}")
         return True, response.get('MessageId')
+        
     except ClientError as e:
         error_code = e.response['Error']['Code']
         error_message = e.response['Error']['Message']
         print(f"[SES] 发送失败!")
         print(f" 错误码: {error_code}")
         print(f" 错误信息: {error_message}")
-
-        # 提供友好的错误提示
+        
         user_message = get_ses_error_message(error_code, error_message, to_email)
         print(f" 用户提示: {user_message}")
         print(f" 完整异常: {traceback.format_exc()}")
-
+        
         return False, f"{error_code}: {user_message}"
     except Exception as e:
         print(f"[SES] 发送失败 (非AWS异常)!")
@@ -142,30 +238,67 @@ def get_ses_error_message(error_code, error_message, recipient_email):
     return f"SES 错误: {error_message}\n建议: 请检查 AWS SES 配置和邮箱验证状态"
 
 
-def send_email(to_email, subject, body_html, mock=False):
+def send_email_with_binding(user_id, to_email, subject, body_html, sender_binding_id=None, mock=False):
     """
-    统一邮件发送函数
+    使用用户绑定的邮箱发送邮件
+    M4: 双模式支持 (personal/system)
+    
+    Returns:
+        tuple: (success, message_id, binding, error_message)
+    """
+    cfg = current_app.config
+    use_mock = mock or cfg.get('MOCK_EMAIL_SEND', False)
+    
+    # 获取发件人信息
+    binding, source, reply_to, error = get_sender_for_user(user_id, sender_binding_id)
+    
+    if error:
+        return False, None, None, error
+    
+    # 发送邮件
+    if use_mock:
+        ok, msg_id = send_mock_email(to_email, subject, body_html, source=source)
+    else:
+        ok, msg_id = send_ses_email(to_email, subject, body_html, source=source, reply_to=reply_to)
+    
+    # 更新配额计数
+    if ok and binding:
+        increment_sender_quota(binding)
+    
+    return ok, msg_id, binding, None if ok else msg_id
+
+
+def send_email(to_email, subject, body_html, mock=False, source=None, reply_to=None):
+    """
+    统一邮件发送函数（向后兼容）
     根据 mock 参数或全局配置决定发送方式
     """
     cfg = current_app.config
     use_mock = mock or cfg.get('MOCK_EMAIL_SEND', False)
-
+    
+    if not source:
+        source = cfg.get('SES_SENDER_EMAIL', 'noreply@example.com')
+    
     if use_mock:
-        return send_mock_email(to_email, subject, body_html)
+        return send_mock_email(to_email, subject, body_html, source=source)
     else:
-        return send_ses_email(to_email, subject, body_html)
+        return send_ses_email(to_email, subject, body_html, source=source, reply_to=reply_to)
 
 
 @email_bp.route('/send', methods=['POST'])
 @jwt_required()
 def send_email_api():
-    """发送邮件 API"""
+    """
+    发送邮件 API
+    M4: 支持选择发件邮箱和配额检查
+    """
     uid = int(get_jwt_identity())
     data = request.get_json()
     template_id = data.get('template_id')
     contact_ids = data.get('contact_ids', [])
     group_ids = data.get('group_ids', [])
     mock = data.get('mock', False)
+    sender_binding_id = data.get('sender_binding_id')  # M4: 可选，指定发件邮箱
 
     if not template_id:
         return jsonify(msg='请选择邮件模板'), 400
@@ -190,17 +323,35 @@ def send_email_api():
 
     results = []
     for addr in emails:
-        ok, msg_id = send_email(addr, tpl.subject, tpl.body, mock=mock)
-        log = EmailLog(user_id=uid, template_id=tpl.id, recipient_email=addr,
-                       subject=tpl.subject, status='sent' if ok else 'failed',
-                       message_id=msg_id if ok else None)
+        # M4: 使用新的发送函数
+        ok, msg_id, binding, error = send_email_with_binding(
+            uid, addr, tpl.subject, tpl.body, 
+            sender_binding_id=sender_binding_id, 
+            mock=mock
+        )
+        
+        # 记录发送日志
+        log = EmailLog(
+            user_id=uid, 
+            template_id=tpl.id, 
+            recipient_email=addr,
+            subject=tpl.subject, 
+            status='sent' if ok else 'failed',
+            message_id=msg_id if ok else None,
+            sender_binding_id=binding.id if binding else None,
+            sender_email_type=binding.email_type if binding else 'system_default',
+            reply_to_email=binding.real_email if binding and binding.email_type == 'system' else None
+        )
         db.session.add(log)
+        
         results.append({
             'email': addr,
             'status': 'sent' if ok else 'failed',
             'message_id': msg_id if ok else None,
-            'error': None if ok else msg_id  # 失败时 msg_id 存储错误信息
+            'error': error if not ok else None,
+            'sender': binding.email if binding else current_app.config.get('SES_SENDER_EMAIL')
         })
+    
     db.session.commit()
     return jsonify(results=results), 200
 

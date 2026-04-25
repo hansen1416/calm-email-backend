@@ -6,7 +6,7 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, EmailEvent, Workflow, WorkflowInstance, EmailLog, EmailTemplate, Contact, ContactGroup
-from routes.email import send_email
+from routes.email import send_email_with_binding
 from services.scheduler import schedule_relative_delay, schedule_absolute_delay, get_scheduled_jobs, cancel_scheduled_job
 from utils.sns_handler import handle_sns_message
 
@@ -476,7 +476,15 @@ def simulate_event():
     if not message_id or not recipient_email:
         return jsonify(msg='message_id and recipient_email are required'), 400
 
-    # 查找匹配的实例
+    # 查找匹配的实例（添加调试日志）
+    logger.info(f"[Simulate] Looking for instance: message_id={message_id}, recipient={recipient_email}, status=waiting_event")
+    
+    # 先检查所有该message_id的实例
+    all_instances = WorkflowInstance.query.filter_by(message_id=message_id).all()
+    logger.info(f"[Simulate] Found {len(all_instances)} instances with message_id={message_id}")
+    for inst in all_instances:
+        logger.info(f"[Simulate]   Instance {inst.id}: status={inst.status}, recipient={inst.recipient_email}, waiting_type={inst.waiting_event_type}")
+    
     instance = WorkflowInstance.query.filter_by(
         message_id=message_id,
         recipient_email=recipient_email,
@@ -484,7 +492,32 @@ def simulate_event():
     ).first()
 
     if not instance:
-        return jsonify(msg='No waiting instance found for this message_id'), 404
+        # 尝试模糊匹配（忽略大小写）
+        from sqlalchemy import func
+        instance = WorkflowInstance.query.filter(
+            WorkflowInstance.message_id == message_id,
+            func.lower(WorkflowInstance.recipient_email) == recipient_email.lower(),
+            WorkflowInstance.status == 'waiting_event'
+        ).first()
+        
+        if not instance:
+            return jsonify(
+                msg='No waiting instance found for this message_id',
+                debug={
+                    'searched_message_id': message_id,
+                    'searched_recipient': recipient_email,
+                    'required_status': 'waiting_event',
+                    'found_instances_count': len(all_instances),
+                    'found_instances': [
+                        {
+                            'id': inst.id,
+                            'status': inst.status,
+                            'recipient': inst.recipient_email,
+                            'waiting_event_type': inst.waiting_event_type
+                        } for inst in all_instances
+                    ]
+                }
+            ), 404
 
     # 检查事件类型是否匹配（忽略大小写）
     if instance.waiting_event_type and instance.waiting_event_type != event_type.lower():
@@ -493,11 +526,37 @@ def simulate_event():
 
     logger.info(f"[Simulate] Event matches instance {instance.id}, triggering continuation")
 
-    # 触发实例继续执行（与SNS处理逻辑完全一致）
-    result = continue_instance_execution(instance, event_data, mock_send, source_event_id=None)
+    # 创建 EmailEvent（与 SNS 处理一致）
+    from models import EmailEvent
+    from datetime import datetime
+    event = EmailEvent(
+        user_id=instance.user_id,
+        instance_id=instance.id,
+        message_id=message_id,
+        event_type=event_type.lower(),
+        recipient_email=recipient_email,
+        event_data=event_data,
+        occurred_at=datetime.utcnow().isoformat(),
+        sns_message_id=f"simulate-{int(datetime.utcnow().timestamp())}",
+        sns_received_at=datetime.utcnow(),
+        sns_delay_seconds=0.0
+    )
+    
+    # 查找对应的 EmailLog 并关联
+    email_log = EmailLog.query.filter_by(message_id=message_id).first()
+    if email_log:
+        event.source_email_log_id = email_log.id
+        
+    db.session.add(event)
+    db.session.commit()
+    logger.info(f"[Simulate] Created EmailEvent: id={event.id}")
+
+    # 触发实例继续执行，传递 event.id 作为 source_event_id
+    result = continue_instance_execution(instance, event_data, mock_send, source_event_id=event.id)
 
     return jsonify({
         'msg': 'Event processed, instance triggered',
+        'event_id': event.id,
         'instance_id': instance.id,
         'result': result
     }), 200

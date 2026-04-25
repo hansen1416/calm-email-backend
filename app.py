@@ -75,28 +75,34 @@ def create_app():
 
     db.init_app(app)
     JWTManager(app)
-    
+
     # 注册蓝图
     from routes.auth import auth_bp
     from routes.contacts import contacts_bp
     from routes.groups import groups_bp
     from routes.templates import templates_bp
     from routes.email import email_bp
+    from routes.email_senders import email_senders_bp
+    from routes.notifications import notifications_bp
+    from routes.payment import payment_bp
     from routes.workflow import workflow_bp
     from routes.webhooks import webhooks_bp
     from routes.instance import instance_bp
     from routes.health import health_bp
-    
+
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(contacts_bp, url_prefix='/api/contacts')
     app.register_blueprint(groups_bp, url_prefix='/api/groups')
     app.register_blueprint(templates_bp, url_prefix='/api/templates')
     app.register_blueprint(email_bp, url_prefix='/api/email')
+    app.register_blueprint(email_senders_bp, url_prefix='/api/email')
+    app.register_blueprint(notifications_bp, url_prefix='/api/notifications')
+    app.register_blueprint(payment_bp, url_prefix='/api/payment')
     app.register_blueprint(workflow_bp, url_prefix='/api/workflow')
     app.register_blueprint(webhooks_bp, url_prefix='/api/webhooks')
     app.register_blueprint(instance_bp, url_prefix='/api')
-    app.register_blueprint(health_bp, url_prefix='/api')  # 健康检查
-    
+    app.register_blueprint(health_bp, url_prefix='/api') # 健康检查
+
     # 注册错误处理器
     register_error_handlers(app)
 

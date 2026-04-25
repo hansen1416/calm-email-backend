@@ -315,6 +315,13 @@ class EmailLog(db.Model):
                              comment='AWS SES Message ID')
     status = db.Column(db.String(20), default='sent',
                        comment='发送状态：sent-已发送，failed-发送失败，bounced-退信，complained-投诉')
+    # M4: 发件绑定信息（代码层面关联 user_sender_binding 表）
+    sender_binding_id = db.Column(db.Integer, nullable=True,
+                                  comment='关联的发件邮箱绑定ID')
+    sender_email_type = db.Column(db.String(20), nullable=True,
+                                  comment='发件类型: personal/system/system_default')
+    reply_to_email = db.Column(db.String(120), nullable=True,
+                               comment='Reply-To 邮箱地址（系统模式下发件人回复地址）')
     sent_at = db.Column(db.DateTime, default=datetime.utcnow,
                         comment='发送时间')
 
@@ -423,3 +430,170 @@ class NodeExecution(db.Model):
 
     def __repr__(self):
         return f'<NodeExecution {self.node_type} {self.node_id} {self.result}>'
+
+
+# ==================== M1: 用户邮箱白名单功能数据模型 ====================
+
+class EmailQuotaConfig(db.Model):
+    """配额配置模板 - 支持差异化配额"""
+    __tablename__ = 'email_quota_config'
+    __table_args__ = {'comment': '配额配置模板 - 支持差异化配额'}
+    
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='配置ID，主键自增')
+    name = db.Column(db.String(50), nullable=False,
+                     comment='配置名称：free/basic/premium')
+    daily_limit = db.Column(db.Integer, default=100,
+                            comment='每日发送限制')
+    description = db.Column(db.String(255), nullable=True,
+                            comment='配置描述')
+    is_default = db.Column(db.Boolean, default=False,
+                           comment='是否默认配置')
+    # 预留价格字段（购买升级功能）
+    price_monthly = db.Column(db.Integer, nullable=True,
+                              comment='月付价格（分）')
+    price_yearly = db.Column(db.Integer, nullable=True,
+                             comment='年付价格（分）')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+
+    def __repr__(self):
+        return f'<EmailQuotaConfig {self.name} {self.daily_limit}/day>'
+
+
+class UserSenderBinding(db.Model):
+    """用户发件邮箱绑定 - 白名单核心表"""
+    __tablename__ = 'user_sender_binding'
+    __table_args__ = (
+        db.Index('idx_usb_user_id', 'user_id'),
+        db.Index('idx_usb_email', 'email'),
+        db.Index('idx_usb_email_type', 'email_type'),
+        {'comment': '用户发件邮箱绑定 - 白名单核心表'}
+    )
+    
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='绑定ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='所属用户ID（代码层面关联user表）')
+    
+    # 核心字段：支持两种模式
+    email = db.Column(db.String(120), nullable=False,
+                     comment='实际发件地址')
+    email_type = db.Column(db.String(20), default='personal',
+                           comment='邮箱类型：personal-用户自己邮箱, system-系统子邮箱')
+    
+    # SES验证状态
+    ses_identity_status = db.Column(db.String(20), default='pending',
+                                    comment='SES身份验证状态：pending/verified/failed')
+    ses_verified_at = db.Column(db.DateTime, nullable=True,
+                                comment='SES验证通过时间')
+    
+    # 个人邮箱验证Token（personal模式使用）
+    verification_token = db.Column(db.String(6), nullable=True,
+                                   comment='6位验证码')
+    token_expires_at = db.Column(db.DateTime, nullable=True,
+                                 comment='验证码过期时间')
+    
+    # 系统模式：关联真实邮箱（用于Reply-To和通知）
+    real_email = db.Column(db.String(120), nullable=True,
+                           comment='用户真实邮箱（用于Reply-To和通知）')
+    
+    # 配额（quota_config_id代码层面关联quota_config表）
+    quota_config_id = db.Column(db.Integer, nullable=True,
+                                comment='关联的配额配置ID')
+    custom_daily_limit = db.Column(db.Integer, nullable=True,
+                                  comment='个性化每日配额（覆盖默认）')
+    
+    # 使用统计（每日重置）
+    daily_sent = db.Column(db.Integer, default=0,
+                           comment='今日已发送数量')
+    daily_reset_at = db.Column(db.DateTime, nullable=True,
+                               comment='配额重置时间')
+    
+    is_default = db.Column(db.Boolean, default=False,
+                         comment='是否默认发件邮箱')
+    is_active = db.Column(db.Boolean, default=True,
+                          comment='是否启用')
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+                           comment='更新时间')
+
+    def __repr__(self):
+        return f'<UserSenderBinding {self.email} ({self.email_type})>'
+
+
+class UserSubscription(db.Model):
+    """用户订阅/购买记录（预留 - 购买升级功能）"""
+    __tablename__ = 'user_subscription'
+    __table_args__ = (
+        db.Index('idx_sub_user_id', 'user_id'),
+        {'comment': '用户订阅/购买记录（预留 - 购买升级功能）'}
+    )
+    
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='订阅ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='用户ID')
+    quota_config_id = db.Column(db.Integer, nullable=False,
+                               comment='购买的配额配置ID')
+    
+    # 支付信息（预留多支付服务商）
+    payment_provider = db.Column(db.String(20), nullable=True,
+                                comment='支付服务商：alipay/wechat/stripe')
+    payment_order_id = db.Column(db.String(100), nullable=True,
+                                comment='支付服务商订单号')
+    amount_paid = db.Column(db.Integer, nullable=True,
+                           comment='实际支付金额（分）')
+    
+    status = db.Column(db.String(20), default='pending',
+                      comment='订阅状态：pending/paid/cancelled/expired')
+    
+    started_at = db.Column(db.DateTime, nullable=True,
+                          comment='订阅开始时间')
+    expires_at = db.Column(db.DateTime, nullable=True,
+                          comment='订阅过期时间')
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+
+    def __repr__(self):
+        return f'<UserSubscription {self.user_id} {self.status}>'
+
+
+class Notification(db.Model):
+    """系统通知 - 用于回复通知、系统消息等"""
+    __tablename__ = 'notification'
+    __table_args__ = (
+        db.Index('idx_notif_user_id', 'user_id'),
+        db.Index('idx_notif_type', 'type'),
+        db.Index('idx_notif_created_at', 'created_at'),
+        {'comment': '系统通知 - 用于回复通知、系统消息等'}
+    )
+    
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True,
+                   comment='通知ID，主键自增')
+    user_id = db.Column(db.Integer, nullable=False,
+                        comment='用户ID')
+    type = db.Column(db.String(50), nullable=False,
+                    comment='通知类型：email_reply/quota_warning/migration_notice/system')
+    title = db.Column(db.String(200), nullable=False,
+                     comment='通知标题')
+    content = db.Column(db.Text, nullable=True,
+                       comment='通知内容')
+    
+    is_read = db.Column(db.Boolean, default=False,
+                       comment='是否已读')
+    
+    # 关联数据（JSON格式，存储相关ID等）
+    related_data = db.Column(db.JSON, nullable=True,
+                            comment='关联数据：如邮件ID、绑定ID等')
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           comment='创建时间')
+    read_at = db.Column(db.DateTime, nullable=True,
+                       comment='阅读时间')
+
+    def __repr__(self):
+        return f'<Notification {self.type} {self.title[:20]}>'
