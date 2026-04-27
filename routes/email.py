@@ -331,7 +331,7 @@ def send_email_api():
     if group_ids:
         groups = ContactGroup.query.filter(ContactGroup.id.in_(group_ids), ContactGroup.user_id == uid).all()
         for g in groups:
-            for c in g.contacts:
+            for c in g.get_contacts():
                 emails.add(c.email)
 
     if not emails:
@@ -552,7 +552,7 @@ def send_template_email():
     if group_ids:
         groups = ContactGroup.query.filter(ContactGroup.id.in_(group_ids), ContactGroup.user_id == uid).all()
         for g in groups:
-            for c in g.contacts:
+            for c in g.get_contacts():
                 emails.add(c.email)
 
     if not emails:

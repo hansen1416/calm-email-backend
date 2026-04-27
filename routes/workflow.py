@@ -255,10 +255,10 @@ def _execute_email_node(instance, node, data, node_id, node_exec, start_time, ui
         if contact_ids:
             for c in Contact.query.filter(Contact.id.in_(contact_ids), Contact.user_id==uid).all():
                 emails.add(c.email)
-        if group_ids:
-            for g in ContactGroup.query.filter(ContactGroup.id.in_(group_ids), Contact.user_id==uid).all():
-                for c in g.contacts:
-                    emails.add(c.email)
+    if group_ids:
+        for g in ContactGroup.query.filter(ContactGroup.id.in_(group_ids), ContactGroup.user_id==uid).all():
+            for c in g.get_contacts():
+                emails.add(c.email)
 
     if not emails:
         end_time = datetime.utcnow()
