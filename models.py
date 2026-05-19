@@ -552,7 +552,12 @@ class UserSubscription(db.Model):
                            comment='实际支付金额（分）')
     
     status = db.Column(db.String(20), default='pending',
-                      comment='订阅状态：pending/paid/cancelled/expired')
+                      comment='订阅状态：pending/paid/cancelling/cancelled/expired')
+    
+    change_type = db.Column(db.String(20), default='new',
+                           comment='变动类型：new-新购/upgrade-升级/downgrade-降级')
+    previous_subscription_id = db.Column(db.Integer, nullable=True,
+                                        comment='换套餐时关联的上一条订阅记录ID')
     
     started_at = db.Column(db.DateTime, nullable=True,
                           comment='订阅开始时间')

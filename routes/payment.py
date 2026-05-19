@@ -66,11 +66,40 @@ def _update_user_quota(uid, quota_config_id):
     db.session.commit()
 
 
-def _cancel_old_subscriptions(uid):
-    """取消用户旧的有效订阅"""
-    old_subs = UserSubscription.query.filter_by(user_id=uid, status='paid').all()
+def _cancel_old_subscriptions(uid, new_sub=None):
+    """取消用户旧的有效订阅（本地 DB + Stripe 两端都取消）"""
+    old_subs = UserSubscription.query.filter(
+        UserSubscription.user_id == uid,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).all()
+
+    # 当前活跃的 Stripe subscription ID（如果有），不要对它调用 cancel
+    active_stripe_sub_id = new_sub.payment_order_id if new_sub else None
+
+    stripe = _get_stripe()
+    cancelled_stripe_ids = set()
     for s in old_subs:
+        # 跳过当前正在用的记录本身
+        if new_sub and s.id == new_sub.id:
+            continue
+
+        # 如果跟当前订阅用的是同一个 Stripe subscription，只取消本地记录
+        # 不调 Stripe cancel（否则会把刚换完套餐的订阅也取消掉）
+        if s.payment_order_id == active_stripe_sub_id:
+            s.status = 'cancelled'
+            s.expires_at = datetime.utcnow()
+            continue
+
+        # 不同的 Stripe subscription → 取消 Stripe 端
+        if s.payment_order_id and s.payment_order_id not in cancelled_stripe_ids:
+            try:
+                stripe.Subscription.modify(s.payment_order_id, cancel_at_period_end=True)
+                cancelled_stripe_ids.add(s.payment_order_id)
+                logger.info(f"[Stripe] Cancelled old Stripe subscription: {s.payment_order_id}")
+            except stripe_lib.error.StripeError as e:
+                logger.warning(f"[Stripe] Failed to cancel old subscription {s.payment_order_id}: {str(e)}")
         s.status = 'cancelled'
+        s.expires_at = datetime.utcnow()
     db.session.commit()
 
 # ---------------------------------------------------------------------------
@@ -151,6 +180,7 @@ def get_publishable_key():
 @payment_bp.route('/create-order', methods=['POST'])
 @jwt_required()
 def create_order():
+    """创建新订阅 (用于首次订阅或取消后重新订阅)"""
     if not current_app.config.get('UPGRADE_FEATURE_ENABLED', False):
         return jsonify(msg='Payment not enabled'), 403
 
@@ -173,6 +203,26 @@ def create_order():
     config = EmailQuotaConfig.query.get(quota_config_id)
     if not config:
         return jsonify(msg='Plan not found'), 404
+
+    # 如果已有 active 订阅，不允许 create-order (应该用 switch-plan)
+    existing = UserSubscription.query.filter(
+        UserSubscription.user_id == uid,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).first()
+    if existing:
+        existing_config = EmailQuotaConfig.query.get(existing.quota_config_id)
+        existing_name = existing_config.name if existing_config else 'unknown'
+        if config.name == existing_name:
+            return jsonify({
+                'msg': f'You are already subscribed to the {config.name} plan.',
+                'action': 'none'
+            }), 409
+        return jsonify({
+            'msg': f'You have an active {existing_name} subscription. Use switch-plan to change plans.',
+            'action': 'switch_plan',
+            'current_plan': existing_name,
+            'existing_subscription_id': existing.id,
+        }), 409
 
     amount = config.price_monthly if billing_cycle == 'monthly' else config.price_yearly
     if not amount:
@@ -303,8 +353,6 @@ def _on_checkout_completed(session):
     stripe = _get_stripe()
     try:
         stripe_sub = stripe.Subscription.retrieve(str(subscription_id))
-        # StripeObject['metadata'] 返回 StripeObject，用 dict() 直接转会触发 KeyError
-        # 正确做法：先转 JSON str 再 parse
         metadata = json.loads(str(stripe_sub['metadata']))
     except Exception as e:
         logger.error(f"[Stripe] Failed to retrieve subscription {subscription_id}: {repr(e)}")
@@ -320,7 +368,10 @@ def _on_checkout_completed(session):
         logger.error("[Stripe] No user_id in subscription metadata")
         return
 
-    # 取消旧订阅
+    # 获取真实的 current_period_end
+    period_end = getattr(stripe_sub, 'current_period_end', None)
+
+    # 取消旧订阅（本地 + Stripe 两端）
     _cancel_old_subscriptions(uid)
 
     # 创建新订阅
@@ -332,8 +383,9 @@ def _on_checkout_completed(session):
         payment_order_id=str(subscription_id),
         amount_paid=amount or 0,
         status='paid',
+        change_type='new',
         started_at=datetime.utcnow(),
-        expires_at=datetime.utcnow() + timedelta(days=30),
+        expires_at=datetime.utcfromtimestamp(period_end) if period_end else datetime.utcnow() + timedelta(days=30),
     )
     db.session.add(sub)
 
@@ -356,9 +408,10 @@ def _on_checkout_completed(session):
 def _on_subscription_updated(subscription):
     """订阅状态变更"""
     stripe_sub_id = str(getattr(subscription, 'id', ''))
-    sub = UserSubscription.query.filter_by(
-        payment_order_id=stripe_sub_id
-    ).filter(UserSubscription.status.in_(['paid', 'cancelling'])).first()
+    sub = UserSubscription.query.filter(
+        UserSubscription.payment_order_id == stripe_sub_id,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).order_by(UserSubscription.created_at.desc()).first()
     if sub:
         stripe_status = getattr(subscription, 'status', '')
         cancel_at_period = getattr(subscription, 'cancel_at_period_end', False)
@@ -378,9 +431,10 @@ def _on_subscription_updated(subscription):
 def _on_subscription_deleted(subscription):
     """订阅取消 → 降级为 Free"""
     stripe_sub_id = str(getattr(subscription, 'id', ''))
-    sub = UserSubscription.query.filter_by(
-        payment_order_id=stripe_sub_id
-    ).filter(UserSubscription.status.in_(['paid', 'cancelling'])).first()
+    sub = UserSubscription.query.filter(
+        UserSubscription.payment_order_id == stripe_sub_id,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).order_by(UserSubscription.created_at.desc()).first()
     if sub:
         sub.status = 'cancelled'
         sub.expires_at = datetime.utcnow()
@@ -407,11 +461,17 @@ def _on_invoice_paid(invoice):
     stripe_sub_id = str(getattr(invoice, 'subscription', ''))
     if not stripe_sub_id:
         return
-    sub = UserSubscription.query.filter_by(
-        payment_order_id=stripe_sub_id, status='paid'
-    ).first()
+    sub = UserSubscription.query.filter(
+        UserSubscription.payment_order_id == stripe_sub_id,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).order_by(UserSubscription.created_at.desc()).first()
     if sub:
-        sub.expires_at = datetime.utcnow() + timedelta(days=30)
+        period_end = getattr(invoice, 'period_end', None)
+        if period_end:
+            sub.expires_at = datetime.utcfromtimestamp(period_end)
+        else:
+            sub.expires_at = datetime.utcnow() + timedelta(days=30)
+        sub.status = 'paid'  # 续费成功，恢复为 paid
         db.session.commit()
         logger.info(f"[Stripe] Invoice paid: user={sub.user_id}")
 
@@ -419,9 +479,10 @@ def _on_invoice_paid(invoice):
 def _on_payment_failed(invoice):
     """支付失败 → 通知用户"""
     stripe_sub_id = str(getattr(invoice, 'subscription', ''))
-    sub = UserSubscription.query.filter_by(
-        payment_order_id=stripe_sub_id, status='paid'
-    ).first()
+    sub = UserSubscription.query.filter(
+        UserSubscription.payment_order_id == stripe_sub_id,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).order_by(UserSubscription.created_at.desc()).first()
     if sub:
         notification = Notification(
             user_id=sub.user_id,
@@ -432,6 +493,130 @@ def _on_payment_failed(invoice):
         db.session.add(notification)
         db.session.commit()
         logger.warning(f"[Stripe] Payment failed: user={sub.user_id}")
+
+
+# ---------------------------------------------------------------------------
+# 换套餐 (升级/降级) - 通过 Stripe Subscription.modify()
+# ---------------------------------------------------------------------------
+
+@payment_bp.route('/switch-plan', methods=['POST'])
+@jwt_required()
+def switch_plan():
+    """换套餐: 调用 Stripe Subscription.modify 更新价格，同步本地记录"""
+    if not current_app.config.get('UPGRADE_FEATURE_ENABLED', False):
+        return jsonify(msg='Payment not enabled'), 403
+
+    uid = int(get_jwt_identity())
+    data = request.get_json()
+    quota_config_id = data.get('quota_config_id')
+
+    if not quota_config_id:
+        return jsonify(msg='quota_config_id required'), 400
+
+    new_config = EmailQuotaConfig.query.get(quota_config_id)
+    if not new_config:
+        return jsonify(msg='Plan not found'), 404
+
+    # 找到当前活跃的订阅
+    active_sub = UserSubscription.query.filter(
+        UserSubscription.user_id == uid,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).order_by(UserSubscription.created_at.desc()).first()
+
+    if not active_sub:
+        return jsonify(msg='No active subscription found. Use create-order to subscribe.'), 404
+
+    old_config = EmailQuotaConfig.query.get(active_sub.quota_config_id)
+    old_plan_name = old_config.name if old_config else 'unknown'
+
+    if new_config.name == old_plan_name:
+        return jsonify(msg=f'You are already on the {new_config.name} plan.'), 409
+
+    # 判断升级还是降级
+    old_limit = old_config.daily_limit if old_config else 0
+    new_limit = new_config.daily_limit
+    change_type = 'upgrade' if new_limit > old_limit else 'downgrade'
+
+    # 调用 Stripe API 换套餐
+    stripe = _get_stripe()
+    try:
+        stripe_sub = stripe.Subscription.retrieve(active_sub.payment_order_id)
+
+        # Stripe Subscription modify 不接受 inline price_data，需要先创建 Price
+        new_price = stripe.Price.create(
+            currency='gbp',
+            unit_amount=new_config.price_monthly,
+            recurring={'interval': 'month'},
+            product_data={'name': f'MailFlow {new_config.name}'},
+        )
+
+        # 更新 subscription items — 删旧加新
+        old_item_id = stripe_sub['items']['data'][0]['id'] if stripe_sub['items']['data'] else None
+
+        updated_sub = stripe.Subscription.modify(
+            active_sub.payment_order_id,
+            proration_behavior='create_prorations',
+            items=[{
+                'id': old_item_id,
+                'deleted': True,
+            }, {
+                'price': new_price.id,
+            }],
+            metadata={
+                'user_id': str(uid),
+                'quota_config_id': str(quota_config_id),
+                'plan': new_config.name,
+            },
+        )
+
+        logger.info(f"[Stripe] Switched subscription {active_sub.payment_order_id} from {old_plan_name} to {new_config.name}")
+
+        # Stripe modify 成功后，清理其他意外遗留的活跃 Stripe 订阅
+        _cancel_old_subscriptions(uid, new_sub=active_sub)
+
+    except stripe_lib.error.StripeError as e:
+        logger.error(f"[Stripe] Error switching plan: {str(e)}")
+        return jsonify(msg=f'Stripe error: {str(e)}'), 500
+
+    # 本地：保留旧记录不变，创建新记录标记变更
+    new_sub = UserSubscription(
+        user_id=uid,
+        quota_config_id=quota_config_id,
+        payment_provider='stripe',
+        payment_order_id=active_sub.payment_order_id,  # 同一个 Stripe subscription
+        amount_paid=active_sub.amount_paid,  # Stripe 会通过 invoice 补差价
+        status='paid',
+        change_type=change_type,
+        previous_subscription_id=active_sub.id,
+        started_at=datetime.utcnow(),
+        expires_at=active_sub.expires_at,
+    )
+    db.session.add(new_sub)
+
+    # 更新配额
+    _update_user_quota(uid, quota_config_id)
+
+    # 通知
+    direction = 'upgraded' if change_type == 'upgrade' else 'downgraded'
+    notification = Notification(
+        user_id=uid,
+        type='subscription',
+        title=f'Plan {direction.capitalize()}',
+        content=f'Your plan has been {direction} from {old_plan_name} to {new_config.name}. '
+                f'Prorated charges will appear on your next invoice.',
+    )
+    db.session.add(notification)
+    db.session.commit()
+
+    logger.info(f"[Stripe] Plan switch recorded: user={uid} {old_plan_name}->{new_config.name} ({change_type})")
+
+    return jsonify({
+        'msg': f'Plan switched from {old_plan_name} to {new_config.name} ({change_type}).',
+        'change_type': change_type,
+        'new_plan': new_config.name,
+        'old_plan': old_plan_name,
+    }), 200
+
 
 # ---------------------------------------------------------------------------
 # 用户订单/订阅查询
@@ -456,6 +641,14 @@ def get_orders():
         if s.started_at:
             trial_end = s.started_at + timedelta(days=7)
 
+        # 获取前一条记录的套餐名（用于展示变更方向）
+        previous_plan = None
+        if s.previous_subscription_id:
+            prev_sub = UserSubscription.query.get(s.previous_subscription_id)
+            if prev_sub:
+                prev_config = EmailQuotaConfig.query.get(prev_sub.quota_config_id)
+                previous_plan = prev_config.name if prev_config else None
+
         result.append({
             'id': s.id,
             'quota_config_id': s.quota_config_id,
@@ -464,6 +657,8 @@ def get_orders():
             'amount_paid': s.amount_paid / 100 if s.amount_paid else 0,
             'plan_price': config.price_monthly / 100 if config and config.price_monthly else None,
             'plan_name': config.name if config else None,
+            'change_type': s.change_type or 'new',
+            'previous_plan': previous_plan,
             'trial_end': trial_end.isoformat() if trial_end else None,
             'trial_remaining_days': (trial_end - datetime.utcnow()).days if trial_end and trial_end > datetime.utcnow() else 0,
             'status': s.status,
@@ -480,9 +675,10 @@ def get_orders():
 def get_my_subscription():
     """获取当前用户的有效订阅信息"""
     uid = int(get_jwt_identity())
-    sub = UserSubscription.query.filter_by(user_id=uid, status='paid').order_by(
-        UserSubscription.created_at.desc()
-    ).first()
+    sub = UserSubscription.query.filter(
+        UserSubscription.user_id == uid,
+        UserSubscription.status.in_(['paid', 'cancelling'])
+    ).order_by(UserSubscription.created_at.desc()).first()
 
     if not sub:
         return jsonify({'active': False, 'plan': 'free'}), 200
