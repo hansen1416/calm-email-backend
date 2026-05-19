@@ -88,3 +88,26 @@ class Config:
     # Redis 配置（用于消息去重，可选）
     REDIS_ENABLED = os.environ.get('REDIS_ENABLED', 'false').lower() in ('true', '1', 'yes')
     REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+
+    # ------------------------------------------
+    # Stripe 支付配置（英国市场 + 全欧洲）
+    # ------------------------------------------
+    # 升级功能总开关
+    UPGRADE_FEATURE_ENABLED = os.environ.get('UPGRADE_FEATURE_ENABLED', 'false').lower() in ('true', '1', 'yes')
+    PAYMENT_STRIPE_ENABLED = os.environ.get('PAYMENT_STRIPE_ENABLED', 'false').lower() in ('true', '1', 'yes')
+
+    # Stripe 模式: test | live（一个开关切换）
+    STRIPE_MODE = os.environ.get('STRIPE_MODE', 'test')
+
+    # Test 模式 Keys（开发用，无需企业认证）
+    STRIPE_TEST_SECRET_KEY = os.environ.get('STRIPE_TEST_SECRET_KEY', '')
+    STRIPE_TEST_PUBLISHABLE_KEY = os.environ.get('STRIPE_TEST_PUBLISHABLE_KEY', '')
+    STRIPE_TEST_WEBHOOK_SECRET = os.environ.get('STRIPE_TEST_WEBHOOK_SECRET', '')
+
+    # Live 模式 Keys（生产用，需企业认证后获取）
+    STRIPE_LIVE_SECRET_KEY = os.environ.get('STRIPE_LIVE_SECRET_KEY', '')
+    STRIPE_LIVE_PUBLISHABLE_KEY = os.environ.get('STRIPE_LIVE_PUBLISHABLE_KEY', '')
+    STRIPE_LIVE_WEBHOOK_SECRET = os.environ.get('STRIPE_LIVE_WEBHOOK_SECRET', '')
+
+    # 应用公网 URL（Webhook 回调地址）
+    APP_URL = os.environ.get('APP_URL', 'http://localhost:5173')

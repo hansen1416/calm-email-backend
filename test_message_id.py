@@ -26,13 +26,13 @@ def get_jwt_token():
         })
         if resp.status_code == 200:
             TOKEN = resp.json().get('access_token')
-            print(f"✓ Got JWT token: {TOKEN[:20]}...")
-            return TOKEN
-        else:
-            print(f"✗ Login failed: {resp.status_code}")
-            return None
+        print(f"OK Got JWT token: {TOKEN[:20]}...")
+        return TOKEN
+    else:
+        print(f"FAIL Login failed: {resp.status_code}")
+        return None
     except Exception as e:
-        print(f"✗ Login error: {e}")
+        print(f"FAIL Login error: {e}")
         return None
 
 def execute_workflow(workflow_id=3):
@@ -44,22 +44,22 @@ def execute_workflow(workflow_id=3):
     
     if resp.status_code == 200:
         data = resp.json()
-        print(f"✓ Workflow executed: {data}")
+        print(f"OK Workflow executed: {data}")
         return data.get('instances', [])
     else:
-        print(f"✗ Workflow execution failed: {resp.status_code} - {resp.text}")
+        print(f"FAIL Workflow execution failed: {resp.status_code} - {resp.text}")
         return []
 
 def get_instance_details(instance_id):
     """获取实例详情"""
     headers = {"Authorization": f"Bearer {TOKEN}"}
     resp = requests.get(f"{BASE_URL}/api/instance/{instance_id}", headers=headers)
-    
+
     if resp.status_code == 200:
         data = resp.json()
         return data
     else:
-        print(f"✗ Get instance failed: {resp.status_code} - {resp.text}")
+        print(f"FAIL Get instance failed: {resp.status_code} - {resp.text}")
         return None
 
 def simulate_event(message_id, recipient_email="ice_br2046@163.com", event_type="open"):
@@ -88,10 +88,10 @@ def simulate_event(message_id, recipient_email="ice_br2046@163.com", event_type=
     
     if resp.status_code == 200:
         data = resp.json()
-        print(f"✓ Event simulated: {data}")
+        print(f"OK Event simulated: {data}")
         return data
     else:
-        print(f"✗ Event simulation failed: {resp.status_code} - {resp.text}")
+        print(f"FAIL Event simulation failed: {resp.status_code} - {resp.text}")
         return None
 
 def check_database_records(instance_id):
@@ -143,25 +143,33 @@ def check_database_records(instance_id):
                 f"SELECT id, node_id, node_type, result, resumed_by_event_id FROM node_execution WHERE instance_id = {instance_id} ORDER BY id"
             )).fetchall()
             
-            print(f"\nNodeExecution Records ({len(result)}):")
-            for row in result:
-                print(f"  [{row[0]}] node={row[1]}, type={row[2]}, result={row[3]}, resumed_by_event_id={row[4]}")
-            
-            return True
-    except Exception as e:
-        print(f"✗ Database check failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    print(f"\nNodeExecution Records ({len(result)}):")
+    for row in result:
+        print(f" [{row[0]}] node={row[1]}, type={row[2]}, result={row[3]}, resumed_by_event_id={row[4]}")
+
+    return True
+except Exception as e:
+    print(f"FAIL Database check failed: {e}")
+    import traceback
+    traceback.print_exc()
+    return False
 
 def main():
     print("="*60)
     print("Message ID Consistency Test")
     print("="*60)
-    
+
     # 获取 token
     if not get_jwt_token():
-        print("✗ Cannot proceed without JWT token")
+        print("FAIL Cannot proceed without JWT token")
+        return
+
+    # 执行工作流
+    print("\n--- Step 1: Execute Workflow ---")
+    instances = execute_workflow(workflow_id=3)
+
+    if not instances:
+        print("FAIL No instances created")
         return
     
     # 执行工作流

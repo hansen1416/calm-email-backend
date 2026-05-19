@@ -463,6 +463,12 @@ def get_quota():
             'using_system_default': True
         }), 200
     
+    # 每日重置
+    if binding.daily_reset_at and binding.daily_reset_at.date() < datetime.utcnow().date():
+        binding.daily_sent = 0
+        binding.daily_reset_at = datetime.utcnow()
+        db.session.commit()
+
     # 计算剩余配额
     quota_config = None
     if binding.quota_config_id:
