@@ -10,7 +10,7 @@ from datetime import datetime
 notifications_bp = Blueprint('notifications', __name__)
 
 
-@notifications_bp.route('/notifications', methods=['GET'])
+@notifications_bp.route('', methods=['GET'], strict_slashes=False)
 @jwt_required()
 def list_notifications():
     """
@@ -70,7 +70,7 @@ def list_notifications():
     }), 200
 
 
-@notifications_bp.route('/notifications/<int:notification_id>/read', methods=['PUT'])
+@notifications_bp.route('/<int:notification_id>/read', methods=['PUT'])
 @jwt_required()
 def mark_notification_read(notification_id):
     """标记通知为已读"""
@@ -94,7 +94,7 @@ def mark_notification_read(notification_id):
     }), 200
 
 
-@notifications_bp.route('/notifications/read-all', methods=['PUT'])
+@notifications_bp.route('/read-all', methods=['PUT'])
 @jwt_required()
 def mark_all_notifications_read():
     """标记所有通知为已读"""
@@ -115,7 +115,7 @@ def mark_all_notifications_read():
     }), 200
 
 
-@notifications_bp.route('/notifications/<int:notification_id>', methods=['DELETE'])
+@notifications_bp.route('/<int:notification_id>', methods=['DELETE'])
 @jwt_required()
 def delete_notification(notification_id):
     """删除通知"""
@@ -138,7 +138,7 @@ def delete_notification(notification_id):
     }), 200
 
 
-@notifications_bp.route('/notifications/unread-count', methods=['GET'])
+@notifications_bp.route('/unread-count', methods=['GET'])
 @jwt_required()
 def get_unread_count():
     """获取未读通知数量"""

@@ -5,8 +5,11 @@ from models import db, EmailTemplate
 templates_bp = Blueprint('templates', __name__)
 
 def tpl_to_dict(t):
-    return dict(id=t.id, name=t.name, subject=t.subject, body=t.body,
-                created_at=t.created_at.strftime('%Y-%m-%d %H:%M:%S'))
+    d = dict(id=t.id, name=t.name, subject=t.subject, body=t.body,
+             created_at=t.created_at.strftime('%Y-%m-%d %H:%M:%S'))
+    if t.blocks:
+        d['blocks'] = t.blocks
+    return d
 
 @templates_bp.route('', methods=['GET'])
 @jwt_required()
@@ -20,9 +23,12 @@ def list_templates():
 def create_template():
     uid = int(get_jwt_identity())
     data = request.get_json()
-    if not data.get('name') or not data.get('subject') or not data.get('body'):
-        return jsonify(msg='模板名称、主题和内容不能为空'), 400
-    t = EmailTemplate(user_id=uid, name=data['name'], subject=data['subject'], body=data['body'])
+    if not data.get('name') or not data.get('subject'):
+        return jsonify(msg='模板名称和主题不能为空'), 400
+    if not data.get('body') and not data.get('blocks'):
+        return jsonify(msg='模板内容不能为空'), 400
+    t = EmailTemplate(user_id=uid, name=data['name'], subject=data['subject'],
+                     body=data.get('body', ''), blocks=data.get('blocks'))
     db.session.add(t)
     db.session.commit()
     return jsonify(tpl_to_dict(t)), 201
@@ -37,7 +43,10 @@ def update_template(tid):
     data = request.get_json()
     t.name = data.get('name', t.name)
     t.subject = data.get('subject', t.subject)
-    t.body = data.get('body', t.body)
+    if 'body' in data:
+        t.body = data['body']
+    if 'blocks' in data:
+        t.blocks = data['blocks']
     db.session.commit()
     return jsonify(tpl_to_dict(t)), 200
 

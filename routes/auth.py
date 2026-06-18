@@ -3,7 +3,7 @@ from flask_jwt_extended import (
     create_access_token, create_refresh_token, jwt_required, get_jwt_identity,
     set_access_cookies, set_refresh_cookies, unset_jwt_cookies
 )
-from models import db, User
+from models import db, User, Referral, ReferralSignup
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -13,6 +13,7 @@ def register():
     username = data.get('username', '').strip()
     password = data.get('password', '').strip()
     email = data.get('email', '').strip()
+    ref_code = data.get('ref', '').strip()
     if not username or not password:
         return jsonify(msg='用户名和密码不能为空'), 400
     if User.query.filter_by(username=username).first():
@@ -20,9 +21,14 @@ def register():
     user = User(username=username, email=email)
     user.set_password(password)
     db.session.add(user)
+    db.session.flush()
+    # 处理推荐码: 通过ref_code查referral表，记录signup
+    if ref_code:
+        referral = Referral.query.filter_by(code=ref_code).first()
+        if referral:
+            db.session.add(ReferralSignup(referral_id=referral.id, new_user_id=user.id))
     db.session.commit()
     return jsonify(msg='注册成功'), 201
-
 @auth_bp.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -73,4 +79,29 @@ def logout():
 @jwt_required()
 def me():
     user = User.query.get(int(get_jwt_identity()))
-    return jsonify(id=user.id, username=user.username, email=user.email), 200
+    return jsonify(id=user.id, username=user.username, email=user.email, avatar=user.avatar or 'avatar-1'), 200
+
+@auth_bp.route('/profile', methods=['PUT'])
+@jwt_required()
+def update_profile():
+    user = User.query.get(int(get_jwt_identity()))
+    data = request.get_json()
+    if 'avatar' in data:
+        user.avatar = data['avatar']
+    if 'email' in data:
+        user.email = data['email']
+    db.session.commit()
+    return jsonify(id=user.id, username=user.username, email=user.email, avatar=user.avatar or 'avatar-1'), 200
+
+@auth_bp.route('/change-password', methods=['PUT'])
+@jwt_required()
+def change_password():
+    user = User.query.get(int(get_jwt_identity()))
+    data = request.get_json()
+    if not data.get('old_password') or not data.get('new_password'):
+        return jsonify(msg='旧密码和新密码不能为空'), 400
+    if not user.check_password(data['old_password']):
+        return jsonify(msg='旧密码错误'), 400
+    user.change_password(data['new_password'])
+    db.session.commit()
+    return jsonify(msg='密码修改成功'), 200

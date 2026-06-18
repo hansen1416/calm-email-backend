@@ -27,6 +27,8 @@ class User(db.Model):
                       comment='用户邮箱，可选')
     created_at = db.Column(db.DateTime, default=datetime.utcnow,
                            comment='创建时间')
+    avatar = db.Column(db.String(50), nullable=True, default='avatar-1',
+                      comment='头像标识')
 
     def set_password(self, password):
         """设置密码"""
@@ -35,6 +37,10 @@ class User(db.Model):
     def check_password(self, password):
         """验证密码"""
         return check_password_hash(self.password_hash, password)
+
+    def change_password(self, new_password):
+        """修改密码"""
+        self.password_hash = generate_password_hash(new_password)
 
     def __repr__(self):
         return f'<User {self.username}>'
@@ -63,6 +69,10 @@ class Contact(db.Model):
                        comment='联系人公司')
     notes = db.Column(db.Text, nullable=True,
                       comment='备注信息')
+    custom_fields = db.Column(db.JSON, nullable=True,
+                       comment='自定义字段（JSON格式）')
+    status = db.Column(db.String(20), default='active',
+                      comment='状态: active/dnc')
     created_at = db.Column(db.DateTime, default=datetime.utcnow,
                            comment='创建时间')
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
@@ -171,6 +181,8 @@ class EmailTemplate(db.Model):
                          comment='邮件主题')
     body = db.Column(db.Text, nullable=False,
                      comment='邮件正文（支持HTML）')
+    blocks = db.Column(db.JSON, nullable=True,
+                      comment='Editor.js Block数据（JSON格式）')
     created_at = db.Column(db.DateTime, default=datetime.utcnow,
                            comment='创建时间')
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
@@ -606,3 +618,121 @@ class Notification(db.Model):
 
     def __repr__(self):
         return f'<Notification {self.type} {self.title[:20]}>'
+
+
+class ManualTask(db.Model):
+    __tablename__ = 'manual_task'
+    __table_args__ = (
+        db.Index('idx_mtask_user_id', 'user_id'),
+        db.Index('idx_mtask_instance_id', 'instance_id'),
+        {'comment': '人工任务表'}
+    )
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    instance_id = db.Column(db.Integer, nullable=True)
+    workflow_name = db.Column(db.String(100), nullable=True)
+    contact_name = db.Column(db.String(100), nullable=True)
+    contact_email = db.Column(db.String(120), nullable=True)
+    title = db.Column(db.String(200), nullable=False)
+    task_content = db.Column(db.Text, nullable=True)  # 人工任务的工作内容
+    description = db.Column(db.Text, nullable=True)
+    node_id = db.Column(db.String(50), nullable=True)
+    status = db.Column(db.String(20), default='pending')
+    result = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    completed_by = db.Column(db.Integer, nullable=True)
+
+    def to_dict(self):
+        return dict(id=self.id, instance_id=self.instance_id, workflow_name=self.workflow_name,
+                    contact_name=self.contact_name, contact_email=self.contact_email,
+                    title=self.title, task_content=self.task_content, description=self.description, node_id=self.node_id,
+                    status=self.status, result=self.result,
+                    created_at=self.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                    completed_at=self.completed_at.strftime('%Y-%m-%d %H:%M:%S') if self.completed_at else None)
+
+    def __repr__(self):
+        return f'<ManualTask {self.title[:20]}>'
+
+
+class OAuthConfig(db.Model):
+    """OAuth2 配置表 - 存储各提供商的 client_id / client_secret"""
+    __tablename__ = 'oauth_config'
+    __table_args__ = (
+        db.Index('idx_oauth_config_user_id', 'user_id'),
+        {'comment': 'OAuth2 配置表'}
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, nullable=False, comment='用户ID')
+    provider = db.Column(db.String(20), nullable=False, comment='提供商: google/outlook')
+    client_id = db.Column(db.String(512), nullable=False, default='', comment='OAuth Client ID')
+    client_secret = db.Column(db.String(512), nullable=False, default='', comment='OAuth Client Secret')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, comment='更新时间')
+
+    def __repr__(self):
+        return f'<OAuthConfig {self.user_id} {self.provider}>'
+
+
+class Referral(db.Model):
+    """推荐链接表"""
+    __tablename__ = 'referral'
+    __table_args__ = (
+        db.Index('idx_referral_referrer', 'referrer_id'),
+        db.Index('idx_referral_code', 'code'),
+        {'comment': '推荐链接表'}
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    referrer_id = db.Column(db.Integer, nullable=False, comment='推荐人用户ID')
+    code = db.Column(db.String(20), nullable=False, unique=True, comment='推荐码')
+    click_count = db.Column(db.Integer, default=0, comment='点击次数')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')
+
+    def __repr__(self):
+        return f'<Referral {self.code}>'
+
+
+class ReferralClick(db.Model):
+    """推荐链接点击记录"""
+    __tablename__ = 'referral_click'
+    __table_args__ = (
+        db.Index('idx_rclick_referral', 'referral_id'),
+        {'comment': '推荐链接点击记录'}
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    referral_id = db.Column(db.Integer, nullable=False, comment='关联 referral.id')
+    ip = db.Column(db.String(50), default='', comment='访问者IP')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='点击时间')
+
+
+class ReferralSignup(db.Model):
+    """推荐注册记录"""
+    __tablename__ = 'referral_signup'
+    __table_args__ = (
+        db.Index('idx_rsignup_referral', 'referral_id'),
+        {'comment': '推荐注册记录'}
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    referral_id = db.Column(db.Integer, nullable=False, comment='关联 referral.id')
+    new_user_id = db.Column(db.Integer, nullable=False, comment='新注册用户ID')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='注册时间')
+
+
+class Commission(db.Model):
+    """佣金记录"""
+    __tablename__ = 'commission'
+    __table_args__ = (
+        db.Index('idx_commission_referrer', 'referrer_id'),
+        {'comment': '佣金记录'}
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    referrer_id = db.Column(db.Integer, nullable=False, comment='推荐人用户ID')
+    amount = db.Column(db.Numeric(10, 2), default=0, comment='佣金金额')
+    status = db.Column(db.String(20), default='pending', comment='状态: pending/paid')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, comment='创建时间')

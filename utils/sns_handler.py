@@ -9,7 +9,26 @@ from datetime import datetime, timedelta
 from functools import wraps
 from flask import current_app
 
-from models import db, EmailEvent, EmailLog
+from models import db, EmailEvent, EmailLog, Contact, WorkflowInstance
+
+
+def _auto_dnc_contact(recipient_email, event_type):
+    """退信/投诉 → 自动标记联系人 DNC + 终止活跃实例"""
+    try:
+        contact = Contact.query.filter_by(email=recipient_email).first()
+        if contact and contact.status != 'dnc':
+            contact.status = 'dnc'
+            current_app.logger.info(f'[AutoDNC] {contact.email} marked dnc ({event_type})')
+        instances = WorkflowInstance.query.filter_by(
+            recipient_email=recipient_email).filter(
+            WorkflowInstance.status.in_(['running', 'pending', 'waiting_event', 'waiting_manual_action'])).all()
+        for inst in instances:
+            inst.status = 'cancelled'
+            current_app.logger.info(f'[AutoDNC] Instance {inst.id} cancelled ({event_type})')
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f'[AutoDNC] Failed: {e}')
 
 
 class SNSMessageHandler:
@@ -203,6 +222,9 @@ def handle_sns_message(sns_message_id, message_id, event_type, recipient_email,
             f"delay={delay_seconds:.2f}s, "
             f"threshold={current_app.config.get('SNS_DELAY_THRESHOLD_SECONDS', 60)}s"
         )
+    # 5. Auto-DNC: Hard Bounce / Complaint → 标记联系人为勿扰
+    if event_type and event_type.lower() in ('bounce', 'complaint'):
+        _auto_dnc_contact(recipient_email, event_type)
 
     return event, False, delay_seconds
 

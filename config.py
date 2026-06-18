@@ -111,3 +111,10 @@ class Config:
 
     # 应用公网 URL（Webhook 回调地址）
     APP_URL = os.environ.get('APP_URL', 'http://localhost:5173')
+    # Brand 合成图片存储配置
+    # local: 保存到本地的 static/brand 目录（默认）
+    # s3:   上传到 AWS S3（需配置 AWS 凭证和 Bucket）
+    BRAND_STORAGE = os.environ.get('BRAND_STORAGE', 'local').lower()
+    BRAND_LOCAL_DIR = os.environ.get('BRAND_LOCAL_DIR', 'static/brand')
+    BRAND_S3_BUCKET = os.environ.get('BRAND_S3_BUCKET', 'calm-email-assets')
+

@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, Workflow, WorkflowInstance, EmailTemplate, EmailLog, Contact, ContactGroup, NodeExecution
+from models import db, Workflow, WorkflowInstance, EmailTemplate, EmailLog, Contact, ContactGroup, NodeExecution, ManualTask
 from routes.email import send_email_with_binding
 from services.scheduler import schedule_relative_delay, schedule_absolute_delay
 from utils.cascade_delete import delete_workflow_cascade
@@ -211,6 +211,8 @@ def execute_node_for_instance(instance, node, node_map, next_map, uid, mock=Fals
         return _execute_condition_node(instance, data, node_id, node_exec, start_time)
     elif node_type == 'event':
         return _execute_event_node(instance, data, node_id, node_exec, start_time)
+    elif node_type == 'call_task':
+        return _execute_call_task_node(instance, node, node_map, next_map, data, node_id, node_exec, start_time, uid)
     else:
         # 默认处理
         end_time = datetime.utcnow()
@@ -226,6 +228,7 @@ def _execute_email_node(instance, node, data, node_id, node_exec, start_time, ui
     template_id = data.get('template_id')
     contact_ids = data.get('contact_ids', [])
     group_ids = data.get('group_ids', [])
+    segment_ids = data.get('segment_ids', [])
 
     if not template_id:
         end_time = datetime.utcnow()
@@ -259,6 +262,18 @@ def _execute_email_node(instance, node, data, node_id, node_exec, start_time, ui
         for g in ContactGroup.query.filter(ContactGroup.id.in_(group_ids), ContactGroup.user_id==uid).all():
             for c in g.get_contacts():
                 emails.add(c.email)
+    if segment_ids:
+        from routes.segments import Segment, _evaluate_rule
+        for seg in Segment.query.filter(Segment.id.in_(segment_ids), Segment.user_id==uid).all():
+            contacts_all = Contact.query.filter_by(user_id=uid).all()
+            for c in contacts_all:
+                results = [_evaluate_rule(c, r) for r in seg.rules]
+                if seg.match_type == 'all':
+                    if all(results):
+                        emails.add(c.email)
+                else:
+                    if any(results):
+                        emails.add(c.email)
 
     if not emails:
         end_time = datetime.utcnow()
@@ -455,6 +470,51 @@ def _execute_event_node(instance, data, node_id, node_exec, start_time):
 
     return True
 
+
+def _execute_call_task_node(instance, node, node_map, next_map, data, node_id, node_exec, start_time, uid):
+    """执行人工任务节点 - 生成待办并暂停实例"""
+    title = data.get('title') or data.get('label') or '人工任务'
+    task_content = data.get('task_content', '')
+    description = data.get('description', '')
+    contact = Contact.query.filter_by(email=instance.recipient_email).first()
+    contact_name = contact.name if contact else instance.recipient_email
+    workflow = Workflow.query.get(instance.workflow_id)
+    mt = ManualTask(
+        user_id=uid,
+        instance_id=instance.id,
+        workflow_name=workflow.name if workflow else '',
+        contact_name=contact_name,
+        contact_email=instance.recipient_email,
+        title=title,
+        task_content=task_content,
+        description=description or task_content,
+        node_id=node_id,
+        status='pending'
+    )
+    db.session.add(mt)
+    # 同步创建站内通知
+    from models import Notification
+    notif = Notification(
+        user_id=uid,
+        type='manual_task',
+        title=f'人工任务: {title}',
+        content=f'工作流 "{workflow.name if workflow else ""}" 需要你处理: {description or title}',
+        related_data={'manual_task_id': mt.id, 'instance_id': instance.id, 'workflow_name': workflow.name if workflow else ''}
+    )
+    db.session.add(notif)
+    instance.status = 'waiting_manual_action'
+    instance.waiting_event_type = 'manual_action'
+    instance.waiting_since = datetime.utcnow()
+    end_time = datetime.utcnow()
+    node_exec.result = 'waiting'
+    node_exec.output_data = {'manual_task_id': mt.id, 'title': title}
+    node_exec.completed_at = end_time
+    node_exec.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+    db.session.commit()
+    current_app.logger.info(f'[CallTask] Instance {instance.id} paused, task #{mt.id} created')
+    return False  # 暂停执行，等待人工完成
+    return False  # 暂停执行，等待人工完成
+
 def traverse_instance(instance, start_node, node_map, next_map, uid, mock=False):
     """遍历执行实例的工作流 - 支持并行路径"""
     visited = set()
@@ -559,6 +619,7 @@ def execute_workflow(wid):
     template_id = email_data.get('template_id')
     contact_ids = email_data.get('contact_ids', [])
     group_ids = email_data.get('group_ids', [])
+    segment_ids = email_data.get('segment_ids', [])
 
     if not template_id:
         return jsonify(msg='邮件节点未配置模板'), 400
@@ -577,6 +638,18 @@ def execute_workflow(wid):
             # 代码层面关联：使用 get_contacts() 方法获取组内联系人
             for c in g.get_contacts():
                 recipient_emails.add(c.email)
+    if segment_ids:
+        from routes.segments import Segment, _evaluate_rule
+        for seg in Segment.query.filter(Segment.id.in_(segment_ids), Segment.user_id==uid).all():
+            contacts_all = Contact.query.filter_by(user_id=uid).all()
+            for c in contacts_all:
+                results = [_evaluate_rule(c, r) for r in seg.rules]
+                if seg.match_type == 'all':
+                    if all(results):
+                        recipient_emails.add(c.email)
+                else:
+                    if any(results):
+                        recipient_emails.add(c.email)
 
     if not recipient_emails:
         return jsonify(msg='没有收件人'), 400

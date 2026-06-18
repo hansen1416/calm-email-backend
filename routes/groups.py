@@ -11,6 +11,14 @@ def group_to_dict(g):
                 contacts=[dict(id=c.id, name=c.name, email=c.email) for c in contacts],
                 created_at=g.created_at.strftime('%Y-%m-%d %H:%M:%S'))
 
+@groups_bp.route('/<int:gid>/members', methods=['GET'])
+@jwt_required()
+def get_members(gid):
+    uid = int(get_jwt_identity())
+    g = ContactGroup.query.filter_by(id=gid, user_id=uid).first()
+    if not g:
+        return jsonify(msg='用户组不存在'), 404
+    return jsonify(group_to_dict(g)), 200
 @groups_bp.route('', methods=['GET'])
 @jwt_required()
 def list_groups():

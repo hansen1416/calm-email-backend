@@ -89,6 +89,12 @@ def create_app():
     from routes.webhooks import webhooks_bp
     from routes.instance import instance_bp
     from routes.health import health_bp
+    from routes.segments import segments_bp  # also registers Segment model
+    from routes.brand import brand_bp
+    from routes.tasks import tasks_bp
+    from routes.domain import domain_bp
+    from routes.oauth import oauth_bp
+    from routes.affiliate import affiliate_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(contacts_bp, url_prefix='/api/contacts')
@@ -102,7 +108,58 @@ def create_app():
     app.register_blueprint(webhooks_bp, url_prefix='/api/webhooks')
     app.register_blueprint(instance_bp, url_prefix='/api')
     app.register_blueprint(health_bp, url_prefix='/api') # 健康检查
+    app.register_blueprint(segments_bp, url_prefix='/api/segments')
+    app.register_blueprint(brand_bp, url_prefix='/api/brand')
+    app.register_blueprint(tasks_bp, url_prefix='/api/tasks')
+    app.register_blueprint(domain_bp, url_prefix='/api/domain')
+    app.register_blueprint(oauth_bp, url_prefix='/api/oauth')
+    app.register_blueprint(affiliate_bp, url_prefix='/api/affiliate')
 
+    # Brand 合成图片静态文件路由
+    from flask import send_from_directory
+    from pathlib import Path
+    import os as _os
+    brand_static_dir = Path(__file__).parent / Config.BRAND_LOCAL_DIR
+    brand_static_dir.mkdir(parents=True, exist_ok=True)
+    @app.route('/static/brand/<path:filename>')
+    def serve_brand_image(filename):
+        return send_from_directory(str(brand_static_dir), filename)
+
+    # 前端 SPA 静态文件路由（serve vue3Model/dist 下的 js/css/assets）
+    _frontend_dist = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), '..', 'vue3Model', 'dist'))
+    _mime_types = {
+        '.js': 'application/javascript',
+        '.mjs': 'application/javascript',
+        '.css': 'text/css',
+        '.html': 'text/html; charset=utf-8',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon',
+        '.woff': 'font/woff',
+        '.woff2': 'font/woff2',
+        '.ttf': 'font/ttf',
+        '.eot': 'application/vnd.ms-fontobject',
+        '.map': 'application/json',
+    }
+    @app.route('/<path:filename>')
+    def serve_frontend_assets(filename):
+        from flask import send_from_directory, abort
+        filepath = _os.path.join(_frontend_dist, filename)
+        if _os.path.isfile(filepath):
+            _, ext = _os.path.splitext(filename)
+            mimetype = _mime_types.get(ext.lower())
+            if mimetype:
+                return send_from_directory(_frontend_dist, filename, mimetype=mimetype)
+            return send_from_directory(_frontend_dist, filename)
+        abort(404)
+
+    @app.route('/')
+    def serve_index():
+        return send_from_directory(_frontend_dist, 'index.html')
     # 注册错误处理器
     register_error_handlers(app)
 
@@ -137,30 +194,29 @@ def register_error_handlers(app):
     # 处理数据库连接错误
     @app.errorhandler(Exception)
     def handle_db_connection_error(error):
-        """处理数据库连接错误，尝试清理会话并重试"""
+        from flask import request
+        from models import db
         error_msg = str(error)
-        if 'Lost connection to MySQL server' in error_msg or 'MySQL server has gone away' in error_msg:
-            # 记录错误但返回友好的响应
-            from models import db
+        if 'Lost connection to MySQL server' in error_msg or 'MySQL server has gone away' in error_msg or 'Can\'t connect to MySQL' in error_msg:
             try:
                 db.session.rollback()
                 db.session.remove()
             except:
                 pass
-            app.logger.warning(f"[DB] Connection lost, session cleaned up: {error_msg[:100]}")
             return jsonify({
                 'success': False,
                 'code': 'DB_CONNECTION_LOST',
                 'message': 'Database connection lost, please retry'
-            }), 503  # Service Unavailable
-        
-        # 其他未处理的异常
-        app.logger.error(f"Unhandled Exception: {str(error)}", exc_info=True)
+            }), 503
+        # 所有其他未处理异常
+        if request:
+            app.logger.error(f"[{request.method}] {request.path} Unhandled: {error_msg[:200]}", exc_info=True)
         return jsonify({
             'success': False,
             'code': 'INTERNAL_ERROR',
             'message': 'An unexpected error occurred'
         }), 500
+
 
     @app.errorhandler(400)
     def bad_request(error):
@@ -191,6 +247,16 @@ def register_error_handlers(app):
     
     @app.errorhandler(404)
     def not_found(error):
+        # SPA fallback: non-API requests should return index.html
+        from flask import request as req
+        path = req.path or ''
+        if not path.startswith('/api/') and not path.startswith('/static/'):
+            from flask import send_from_directory
+            import os
+            dist_dir = os.path.join(os.path.dirname(__file__), '..', 'vue3Model', 'dist')
+            index_path = os.path.join(dist_dir, 'index.html')
+            if os.path.isfile(index_path):
+                return send_from_directory(dist_dir, 'index.html'), 200
         app.logger.warning(f"Not Found: {str(error)}")
         return jsonify({
             'success': False,
@@ -223,15 +289,6 @@ def register_error_handlers(app):
             'success': False,
             'code': 'INTERNAL_ERROR',
             'message': 'An internal error occurred'
-        }), 500
-    
-    @app.errorhandler(Exception)
-    def handle_exception(error):
-        app.logger.error(f"Unhandled Exception: {str(error)}", exc_info=True)
-        return jsonify({
-            'success': False,
-            'code': 'INTERNAL_ERROR',
-            'message': 'An unexpected error occurred'
         }), 500
 
 
