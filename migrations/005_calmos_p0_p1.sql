@@ -22,6 +22,10 @@ ALTER TABLE `contact`
   ADD COLUMN `status` VARCHAR(20) NOT NULL DEFAULT 'active' COMMENT '状态: active-正常, dnc-勿扰'
   AFTER `custom_fields`;
 
+ALTER TABLE `user`
+  ADD COLUMN `avatar` VARCHAR(50) NOT NULL DEFAULT 'avatar-1' COMMENT '头像'
+  AFTER `custom_fields`;
+
 -- ============================================================
 -- P0-3: Segment 动态分段表 (新表)
 -- ============================================================
