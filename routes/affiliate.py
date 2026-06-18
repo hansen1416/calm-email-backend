@@ -16,7 +16,7 @@ def get_referral_link():
     uid = int(get_jwt_identity())
     ref = Referral.query.filter_by(referrer_id=uid).first()
     if ref:
-        link = request.host_url.rstrip('/') + f'/api/affiliate/r/{ref.code}'
+        link = request.host_url.rstrip('/') + f':8890/api/affiliate/r/{ref.code}'
         signups = ReferralSignup.query.filter_by(referral_id=ref.id).count()
         commissions_q = Commission.query.filter_by(referrer_id=uid).all()
         return jsonify(dict(
@@ -30,7 +30,7 @@ def get_referral_link():
     ref = Referral(referrer_id=uid, code=code, click_count=0)
     db.session.add(ref)
     db.session.commit()
-    link = request.host_url.rstrip('/') + f'/api/affiliate/r/{code}'
+    link = request.host_url.rstrip('/') + f':8890/api/affiliate/r/{code}'
     return jsonify(dict(code=code, link=link, clicks=0, signups=0, commissions=[], total_paid=0, total_pending=0)), 200
 
 
@@ -43,7 +43,7 @@ def referral_redirect(code):
     ref.click_count = (ref.click_count or 0) + 1
     db.session.add(ReferralClick(referral_id=ref.id, ip=request.remote_addr or ''))
     db.session.commit()
-    target_url = f"{request.host_url.rstrip('/')}/#/login?ref={code}"
+    target_url = f"{request.host_url.rstrip('/')}:8890/#/login?ref={code}"
     return f'<html><head><meta http-equiv="refresh" content="0;url={target_url}"></head>' \
            f'<body>Redirecting to <a href="{target_url}">login</a>...</body></html>', 200
 
