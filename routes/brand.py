@@ -68,7 +68,7 @@ def synthesize():
             filename = f'{uuid.uuid4().hex}.png'
             with open(local_dir / filename, 'wb') as f:
                 f.write(buf.getvalue())
-            url = f'{request.host_url.rstrip("/")}/static/brand/{filename}'
+            url = f'{request.host_url.rstrip("/")}:8890/static/brand/{filename}'   # ── 如果是本地运行通过vite.config.js proxy的话不用加端口，线上使用nginx代理不是80端口要加端口号 ──
 
         return jsonify({'url': url}), 200
 
